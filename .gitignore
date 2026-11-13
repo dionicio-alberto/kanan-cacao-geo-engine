@@ -21,3 +21,8 @@ htmlcov/
 .DS_Store
 .vscode/
 .idea/
+
+# Local SQLite database
+data/*.db
+data/*.db-*
+

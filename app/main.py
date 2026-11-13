@@ -3,6 +3,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes_custody import router as custody_router
+from app.api.routes_persistence import router as persistence_router
 from app.api.routes_spatial import router as spatial_router
 from app.core.config import EUDR_CUTOFF_DATE_ISO
 
@@ -20,6 +21,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "http://localhost:8081",
+        "http://127.0.0.1:8081",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -28,6 +31,7 @@ app.add_middleware(
 
 app.include_router(spatial_router)
 app.include_router(custody_router)
+app.include_router(persistence_router)
 
 
 @app.get("/health")
