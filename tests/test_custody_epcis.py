@@ -62,3 +62,44 @@ def test_blind_yield_caps_and_epcis_2_0_signature() -> None:
     admin_data = admin_res.json()
     assert admin_data["cumulative_kg_per_ha"] == 700.0
     assert admin_data["triggered_yield_cap_alert"] is True
+
+
+def test_traces_nt_export_package_and_eudr_gate() -> None:
+    coords = [
+        [-93.225, 18.265],
+        [-93.221, 18.265],
+        [-93.221, 18.269],
+        [-93.225, 18.269],
+    ]
+    ok_res = client.post(
+        "/api/v1/exports/traces-nt-package",
+        json={
+            "parcel_id": "PAR-CHONTALPA-01",
+            "producer_id": "PROD-MATEO-01",
+            "municipality": "Comalcalco",
+            "coordinates": coords,
+            "eudr_status": "VERDE",
+            "acahual_removal_post_2020": False,
+            "has_verified_custf_permit": False,
+            "delivered_dry_equivalent_kg": 220.0,
+        },
+    )
+    assert ok_res.status_code == 200
+    pkg = ok_res.json()
+    assert pkg["schema_version"] == "EUDR-TRACES-NT-1.0"
+    assert len(pkg["package_integrity_sha256"]) == 64
+
+    blocked_res = client.post(
+        "/api/v1/exports/traces-nt-package",
+        json={
+            "parcel_id": "PAR-CUNDUACAN-03",
+            "producer_id": "PROD-CARLOS-03",
+            "municipality": "Cunduacán",
+            "coordinates": coords,
+            "eudr_status": "ROJO",
+            "acahual_removal_post_2020": False,
+            "has_verified_custf_permit": False,
+            "delivered_dry_equivalent_kg": 220.0,
+        },
+    )
+    assert blocked_res.status_code == 403
