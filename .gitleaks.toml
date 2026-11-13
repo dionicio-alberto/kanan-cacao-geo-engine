@@ -1,0 +1,23 @@
+title = "Kanan Cacao Geo-Engine Secret Scanning"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "supabase-service-role-key"
+description = "Detects Supabase Service Role JWT tokens or secret keys"
+regex = '''(?i)(supabase_service_role_key|service_role)\s*[:=]\s*['"]?[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+['"]?'''
+tags = ["key", "supabase", "security"]
+
+[[rules]]
+id = "google-earth-engine-private-key"
+description = "Detects Google Cloud / Earth Engine Service Account Private Keys"
+regex = '''-----BEGIN PRIVATE KEY-----'''
+tags = ["key", "gcp", "earth-engine"]
+
+[allowlist]
+description = "Allowlist for example environment files"
+paths = [
+  '''\.env\.example$''',
+  '''docs/'''
+]
