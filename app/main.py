@@ -1,6 +1,7 @@
 """FastAPI entry point for Kanan Cacao Geo-Engine."""
 
 from fastapi import FastAPI
+from app.api.routes_custody import router as custody_router
 from app.api.routes_spatial import router as spatial_router
 from app.core.config import EUDR_CUTOFF_DATE_ISO
 
@@ -14,6 +15,7 @@ app = FastAPI(
 )
 
 app.include_router(spatial_router)
+app.include_router(custody_router)
 
 
 @app.get("/health")
