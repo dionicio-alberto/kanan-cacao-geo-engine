@@ -1,14 +1,17 @@
-"""Custody, CUSTF legality (HU-05), Blind Yield Caps (HU-06), and EPCIS 2.0 (HU-07)."""
+"""Custody, CUSTF legality (HU-05), Blind Yield Caps (HU-06), EPCIS 2.0 (HU-07) & TRACES NT."""
 
 from datetime import datetime, timezone
 import hashlib
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from app.core.config import (
     EPCIS_CONTEXT_URL,
+    EUDR_CUTOFF_DATE_ISO,
+    EUDR_LEGAL_DISCLAIMER,
     TABASCO_YIELD_CAP_MAX_KG_HA,
     TABASCO_YIELD_CAP_MIN_KG_HA,
 )
+from app.services.topology_engine import lint_and_validate_polygon
 
 
 def compute_sha256_hex(payload_str: str) -> str:
@@ -102,11 +105,87 @@ def register_epcis_reception(
             "epcis_event": epcis_event,
         }
 
-    # HU-06: Operación "ciega" en la báscula para el rol acopiador
     return {
         "status": "REGISTERED",
         "parcel_id": parcel_id,
         "producer_id": producer_id,
         "delivered_dry_equivalent_kg": delivered_dry_equivalent_kg,
         "epcis_event": epcis_event,
+    }
+
+
+def build_traces_nt_due_diligence_package(
+    parcel_id: str,
+    producer_id: str,
+    municipality: str,
+    coordinates: List[List[float]],
+    eudr_status: str,
+    acahual_removal_post_2020: bool,
+    has_verified_custf_permit: bool,
+    delivered_dry_equivalent_kg: float,
+) -> Dict[str, Any]:
+    """
+    Builds a complete European Union TRACES NT Due Diligence Package combining
+    repaired RFC 7946 GeoJSON, EUDR 2020 status, CUSTF verification, and EPCIS 2.0 event.
+    """
+    if acahual_removal_post_2020 and not has_verified_custf_permit:
+        raise PermissionError(
+            "HU-05 Gate: Exportación TRACES NT bloqueada por falta de permiso CUSTF (SEMARNAT)."
+        )
+
+    if eudr_status != "VERDE":
+        raise PermissionError(
+            "HU-03 Gate: Exportación TRACES NT bloqueada. La parcela no tiene estatus EUDR VERDE."
+        )
+
+    topology = lint_and_validate_polygon(coordinates)
+    epcis_res = register_epcis_reception(
+        parcel_id=parcel_id,
+        producer_id=producer_id,
+        read_point_id="urn:epc:id:sgln:7500000.00001.0",
+        area_hectares=topology["area_hectares"],
+        previous_cumulative_dry_kg=0.0,
+        delivered_dry_equivalent_kg=delivered_dry_equivalent_kg,
+        acahual_removal_post_2020=acahual_removal_post_2020,
+        has_verified_custf_permit=has_verified_custf_permit,
+        requester_role="admin_astra",
+    )
+
+    generated_at = datetime.now(timezone.utc).isoformat()
+    canonical = json.dumps(
+        {
+            "schema_version": "EUDR-TRACES-NT-1.0",
+            "parcel_id": parcel_id,
+            "producer_id": producer_id,
+            "polygon": topology["polygon"],
+            "epcis_sha256": epcis_res["epcis_event"]["payloadSha256"],
+        },
+        sort_keys=True,
+    )
+
+    return {
+        "schema_version": "EUDR-TRACES-NT-1.0",
+        "exporter_entity": "ASTRA S.A.S. - Kanan Cacao (Tabasco, MX)",
+        "generated_at_iso": generated_at,
+        "parcel_id": parcel_id,
+        "producer_id": producer_id,
+        "municipality": municipality,
+        "commodity_hs_code": "1801.00 (Cacao en grano, entero o partido, crudo o tostado)",
+        "eudr_cutoff_baseline": EUDR_CUTOFF_DATE_ISO,
+        "eudr_status": eudr_status,
+        "legal_disclaimer": EUDR_LEGAL_DISCLAIMER,
+        "area_hectares": topology["area_hectares"],
+        "geojson_feature": {
+            "type": "Feature",
+            "properties": {
+                "parcel_id": parcel_id,
+                "producer_id": producer_id,
+                "municipality": municipality,
+                "country_iso": "MX",
+                "region": "Tabasco",
+            },
+            "geometry": topology["polygon"],
+        },
+        "epcis_2_0_event": epcis_res["epcis_event"],
+        "package_integrity_sha256": compute_sha256_hex(canonical),
     }
