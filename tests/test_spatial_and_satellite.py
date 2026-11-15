@@ -95,3 +95,26 @@ def test_sentinel2_ndvi_multitemporal_classifications() -> None:
     assert fungal_alert.status_code == 200
     assert fungal_alert.json()["category"] == "FOCO_PLAGA_FUNGICA_ALERTA"
     assert "moniliasis" in fungal_alert.json()["agronomic_recommendation"]
+
+
+def test_sentinel2_live_endpoint_returns_ortho_and_stac_metadata() -> None:
+    response = client.post(
+        "/api/v1/audits/sentinel2-live",
+        json={
+            "parcel_id": "PAR-COMALCALCO-LIVE",
+            "coordinates": [
+                [-93.2845, 18.2560],
+                [-93.2810, 18.2560],
+                [-93.2810, 18.2525],
+                [-93.2845, 18.2525],
+            ],
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["parcel_id"] == "PAR-COMALCALCO-LIVE"
+    assert data["collection"] == "sentinel-2-l2a"
+    assert "World_Imagery/MapServer/export" in data["satellite_ortho_url"]
+    assert len(data["bbox"]) == 4
+    assert data["latest_scene_id"]
+    assert data["source_mode"] in {"live_stac", "fallback_cache"}

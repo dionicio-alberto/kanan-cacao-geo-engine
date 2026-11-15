@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from app.services.satellite_audit_engine import (
     evaluate_eudr_2020_baseline,
     evaluate_sentinel2_ndvi,
+    fetch_live_sentinel2_scene,
 )
 from app.services.topology_engine import lint_and_validate_polygon
 
@@ -63,6 +64,17 @@ def audit_ndvi_sentinel2_endpoint(payload: NdviAuditRequest) -> dict:
             previous_mean_ndvi=payload.previous_mean_ndvi,
             latest_scene_id=payload.latest_scene_id,
             latest_mean_ndvi=payload.latest_mean_ndvi,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/audits/sentinel2-live")
+def audit_sentinel2_live_endpoint(payload: PolygonValidationRequest) -> dict:
+    try:
+        return fetch_live_sentinel2_scene(
+            parcel_id=payload.parcel_id,
+            raw_coordinates=payload.coordinates,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

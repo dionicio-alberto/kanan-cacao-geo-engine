@@ -1,9 +1,10 @@
-"""FastAPI endpoints for local SQLite parcel persistence, CUSTF toggles, and offline sync."""
+"""FastAPI endpoints for Supabase PostGIS / SQLite persistence, CUSTF, and offline sync."""
 
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from app.services.local_persistence_engine import (
+    get_active_storage_engine,
     list_persisted_parcels,
     record_persisted_reception,
     sync_offline_parcels,
@@ -29,7 +30,7 @@ class PersistedReceptionRequest(BaseModel):
 def get_parcels_endpoint() -> Dict[str, Any]:
     parcels = list_persisted_parcels()
     return {
-        "storage_engine": "sqlite3_local",
+        "storage_engine": get_active_storage_engine(),
         "count": len(parcels),
         "parcels": parcels,
     }
@@ -39,7 +40,11 @@ def get_parcels_endpoint() -> Dict[str, Any]:
 def toggle_custf_endpoint(parcel_id: str) -> Dict[str, Any]:
     try:
         updated = toggle_parcel_custf(parcel_id)
-        return {"status": "UPDATED", "parcel": updated}
+        return {
+            "status": "UPDATED",
+            "storage_engine": get_active_storage_engine(),
+            "parcel": updated,
+        }
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

@@ -4,6 +4,7 @@ from pathlib import Path
 from app.services.local_persistence_engine import (
     list_persisted_parcels,
     record_persisted_reception,
+    supabase_row_to_parcel_dict,
     sync_offline_parcels,
     toggle_parcel_custf,
 )
@@ -73,3 +74,42 @@ def test_persisted_epcis_reception_updates_cumulative_kg(tmp_path: Path) -> None
     )
     assert admin_res["new_cumulative_dry_kg"] == 2300.0
     assert admin_res["triggered_yield_cap_alert"] is True
+
+
+def test_supabase_row_maps_to_parcel_contract() -> None:
+    mapped = supabase_row_to_parcel_dict(
+        {
+            "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "producer_id": "11111111-1111-4111-8111-111111111111",
+            "parcel_name": "Finca La Joya de Chontalpa",
+            "municipality": "Comalcalco",
+            "area_hectares": 3.8,
+            "eudr_status": "VERDE",
+            "acahual_removal_post_2020": False,
+            "updated_at": "2026-11-15T21:49:47.832586+00:00",
+            "profiles": {"full_name": "Mateo Hernández Chablé"},
+            "eudr_audits": [{"mean_ndvi_score": 0.74}],
+            "shade_tree_inventories": [{"tree_count": 45}, {"tree_count": 30}],
+            "legality_documents": [{"document_type": "CUSTF_SEMARNAT", "verified_by_admin": True}],
+            "epcis_collection_events": [{"delivered_dry_equivalent_kg": 300.0}],
+            "geojson_payload": {
+                "type": "Feature",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[
+                        [-93.2845, 18.256],
+                        [-93.281, 18.256],
+                        [-93.281, 18.2525],
+                        [-93.2845, 18.2525],
+                        [-93.2845, 18.256],
+                    ]],
+                },
+            },
+        }
+    )
+    assert mapped["parcel_id"] == "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    assert mapped["shade_tree_count"] == 75
+    assert mapped["has_verified_custf_permit"] is True
+    assert mapped["cumulative_dry_kg"] == 300.0
+    assert mapped["ndvi_alert_level"] == "VIGOR_AGROFORESTAL_OPTIMO"
+    assert len(mapped["coordinates"]) == 5
