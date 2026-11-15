@@ -1,17 +1,35 @@
-"""Local SQLite persistence engine for Kanan Cacao offline-first sync and E2E testing."""
+"""Supabase PostGIS and SQLite persistence engine for Kanan Cacao R/W and offline sync."""
 
+from datetime import datetime, timezone
+import hashlib
 import json
 import os
+from pathlib import Path
 import sqlite3
 import time
-from pathlib import Path
 from typing import Any, Dict, List, Optional
+import uuid
+import httpx
 from app.services.custody_epcis_engine import register_epcis_reception
 from app.services.topology_engine import lint_and_validate_polygon
 
 DEFAULT_DB_PATH = os.environ.get(
     "KANAN_LOCAL_DB_PATH",
     str(Path(__file__).resolve().parents[2] / "data" / "kanan_local.db"),
+)
+
+DEFAULT_PRODUCER_UUID = "11111111-1111-4111-8111-111111111111"
+DEFAULT_TECH_UUID = "44444444-4444-4444-8444-444444444444"
+DEFAULT_COLLECTOR_UUID = "55555555-5555-4555-8555-555555555555"
+
+PARCEL_SELECT_FIELDS = (
+    "id,producer_id,parcel_name,municipality,area_hectares,geojson_payload,"
+    "eudr_status,acahual_removal_post_2020,updated_at,"
+    "profiles!parcels_producer_id_fkey(full_name,is_blocked_by_custf),"
+    "eudr_audits(mean_ndvi_score,sentinel_scene_id),"
+    "shade_tree_inventories(tree_count),"
+    "legality_documents(id,document_type,verified_by_admin),"
+    "epcis_collection_events(delivered_dry_equivalent_kg)"
 )
 
 SEED_PARCELS: List[Dict[str, Any]] = [
@@ -85,6 +103,366 @@ SEED_PARCELS: List[Dict[str, Any]] = [
         "updated_at_ms": 1731456000000,
     },
 ]
+
+
+def _get_supabase_config() -> tuple[str, str]:
+    url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    return url, key
+
+
+def is_supabase_rw_active(db_path: Optional[str] = None) -> bool:
+    """Return True when default persistence should read/write Supabase PostGIS."""
+    if db_path is not None:
+        return False
+    if os.environ.get("KANAN_FORCE_SQLITE_ONLY") == "1":
+        return False
+    url, key = _get_supabase_config()
+    return bool(url.startswith("http") and "tu-proyecto" not in url and key)
+
+
+def get_active_storage_engine(db_path: Optional[str] = None) -> str:
+    return "supabase_postgis" if is_supabase_rw_active(db_path) else "sqlite3_local"
+
+
+def _pg_headers(prefer: Optional[str] = None) -> Dict[str, str]:
+    _, key = _get_supabase_config()
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    if prefer:
+        headers["Prefer"] = prefer
+    return headers
+
+
+def _classify_ndvi_level(mean_ndvi: float) -> str:
+    if mean_ndvi < 0.45:
+        return "FOCO_PLAGA_FUNGICA_ALERTA"
+    if mean_ndvi < 0.65:
+        return "ESTRES_HIDRICO_TEMPRANO"
+    return "VIGOR_AGROFORESTAL_OPTIMO"
+
+
+def _iso_to_ms(iso_value: Optional[str]) -> int:
+    if not iso_value:
+        return int(time.time() * 1000)
+    try:
+        dt = datetime.fromisoformat(iso_value.replace("Z", "+00:00"))
+        return int(dt.timestamp() * 1000)
+    except ValueError:
+        return int(time.time() * 1000)
+
+
+def _as_uuid(raw_id: str, fallback_uuid: Optional[str] = None) -> str:
+    try:
+        return str(uuid.UUID(raw_id))
+    except (ValueError, TypeError):
+        if fallback_uuid:
+            return fallback_uuid
+        return str(uuid.uuid5(uuid.NAMESPACE_OID, str(raw_id)))
+
+
+def supabase_row_to_parcel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert a Supabase PostgREST parcels row with nested relations into API parcel dict."""
+    profile = row.get("profiles") or {}
+    audits = row.get("eudr_audits") or []
+    trees = row.get("shade_tree_inventories") or []
+    docs = row.get("legality_documents") or []
+    events = row.get("epcis_collection_events") or []
+
+    parcel_name = row.get("parcel_name") or row["id"]
+    full_name = profile.get("full_name") or "Productor ASTRA"
+    display_name = (
+        f"{full_name} ({parcel_name})"
+        if parcel_name and parcel_name not in full_name
+        else full_name
+    )
+
+    mean_ndvi = float(audits[0].get("mean_ndvi_score") or 0.74) if audits else 0.74
+    shade_tree_count = sum(int(item.get("tree_count") or 0) for item in trees)
+    has_custf = any(
+        d.get("document_type") == "CUSTF_SEMARNAT" and bool(d.get("verified_by_admin"))
+        for d in docs
+    )
+    cumulative_dry_kg = sum(
+        float(ev.get("delivered_dry_equivalent_kg") or 0.0) for ev in events
+    )
+
+    payload = row.get("geojson_payload") or {}
+    geom = payload.get("geometry") or {}
+    rings = geom.get("coordinates") or []
+    coords = rings[0] if rings and isinstance(rings[0], list) else [
+        [-93.2845, 18.2560],
+        [-93.2810, 18.2560],
+        [-93.2810, 18.2525],
+        [-93.2845, 18.2525],
+        [-93.2845, 18.2560],
+    ]
+
+    return {
+        "parcel_id": row["id"],
+        "parcel_name": parcel_name,
+        "producer_id": row["producer_id"],
+        "producer_name": display_name,
+        "municipality": row["municipality"],
+        "area_hectares": float(row["area_hectares"]),
+        "eudr_status": row["eudr_status"],
+        "ndvi_alert_level": _classify_ndvi_level(mean_ndvi),
+        "mean_ndvi": mean_ndvi,
+        "shade_tree_count": shade_tree_count,
+        "acahual_removal_post_2020": bool(row.get("acahual_removal_post_2020")),
+        "has_verified_custf_permit": has_custf,
+        "cumulative_dry_kg": cumulative_dry_kg,
+        "is_topology_valid": True,
+        "coordinates": coords,
+        "updated_at_ms": _iso_to_ms(row.get("updated_at")),
+    }
+
+
+def _fetch_supabase_parcels(parcel_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    url, _ = _get_supabase_config()
+    params: Dict[str, str] = {
+        "select": PARCEL_SELECT_FIELDS,
+        "order": "updated_at.desc",
+    }
+    if parcel_id:
+        params["id"] = f"eq.{parcel_id}"
+    with httpx.Client(timeout=10.0) as client:
+        resp = client.get(f"{url}/rest/v1/parcels", params=params, headers=_pg_headers())
+        resp.raise_for_status()
+        rows = resp.json()
+    return [supabase_row_to_parcel_dict(r) for r in rows]
+
+
+def _toggle_supabase_custf(parcel_id: str) -> Dict[str, Any]:
+    url, _ = _get_supabase_config()
+    with httpx.Client(timeout=10.0) as client:
+        res = client.get(
+            f"{url}/rest/v1/parcels",
+            params={
+                "id": f"eq.{parcel_id}",
+                "select": "id,producer_id,legality_documents(id,document_type,verified_by_admin)",
+            },
+            headers=_pg_headers(),
+        )
+        res.raise_for_status()
+        rows = res.json()
+        if not rows:
+            raise ValueError(f"Parcela {parcel_id} no encontrada en Supabase PostGIS.")
+
+        row = rows[0]
+        custf_docs = [
+            d for d in (row.get("legality_documents") or [])
+            if d.get("document_type") == "CUSTF_SEMARNAT"
+        ]
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if custf_docs:
+            doc = custf_docs[0]
+            new_val = not bool(doc.get("verified_by_admin"))
+            patch_res = client.patch(
+                f"{url}/rest/v1/legality_documents",
+                params={"id": f"eq.{doc['id']}"},
+                headers=_pg_headers(),
+                json={
+                    "verified_by_admin": new_val,
+                    "verified_at": now_iso if new_val else None,
+                    "updated_at": now_iso,
+                },
+            )
+            patch_res.raise_for_status()
+        else:
+            doc_hash = hashlib.sha256(f"{parcel_id}:custf:{now_iso}".encode()).hexdigest()
+            post_res = client.post(
+                f"{url}/rest/v1/legality_documents",
+                headers=_pg_headers(),
+                json={
+                    "parcel_id": parcel_id,
+                    "producer_id": row["producer_id"],
+                    "document_type": "CUSTF_SEMARNAT",
+                    "encrypted_storage_uri": (
+                        f"s3://kanan-cacao-vault/semarnat/{parcel_id}-custf.pdf.enc"
+                    ),
+                    "sha256_hash": doc_hash,
+                    "verified_by_admin": True,
+                    "verified_at": now_iso,
+                },
+            )
+            post_res.raise_for_status()
+
+    updated = _fetch_supabase_parcels(parcel_id=parcel_id)
+    if not updated:
+        raise ValueError(f"No fue posible recargar la parcela {parcel_id} desde Supabase.")
+    return updated[0]
+
+
+def _sync_supabase_parcels(pushed_parcels: List[Dict[str, Any]]) -> Dict[str, Any]:
+    url, _ = _get_supabase_config()
+    now_ms = int(time.time() * 1000)
+    accepted_ids: List[str] = []
+
+    with httpx.Client(timeout=12.0) as client:
+        for incoming in pushed_parcels:
+            raw_pid = str(incoming["parcel_id"])
+            pg_id = _as_uuid(raw_pid)
+            raw_coords = incoming.get("coordinates") or [
+                [-93.3900, 17.8500],
+                [-93.3860, 17.8500],
+                [-93.3860, 17.8465],
+                [-93.3900, 17.8465],
+            ]
+            lint_report = lint_and_validate_polygon(raw_coords)
+            area_ha = float(incoming.get("area_hectares") or lint_report["area_hectares"])
+            municipality = incoming.get("municipality", "Comalcalco")
+            parcel_name = (
+                incoming.get("parcel_name")
+                or incoming.get("producer_name")
+                or f"Parcela {raw_pid}"
+            )
+            producer_uuid = _as_uuid(
+                str(incoming.get("producer_id", "")), fallback_uuid=DEFAULT_PRODUCER_UUID
+            )
+            if producer_uuid not in {
+                DEFAULT_PRODUCER_UUID,
+                "22222222-2222-4222-8222-222222222222",
+                "33333333-3333-4333-8333-333333333333",
+            }:
+                producer_uuid = DEFAULT_PRODUCER_UUID
+
+            geojson_payload = {
+                "type": "Feature",
+                "geometry": lint_report["polygon"],
+                "properties": {
+                    "parcelName": parcel_name,
+                    "municipality": municipality,
+                    "hectares": area_ha,
+                    "externalParcelId": raw_pid,
+                },
+            }
+
+            upsert_res = client.post(
+                f"{url}/rest/v1/parcels",
+                params={"on_conflict": "id"},
+                headers=_pg_headers("resolution=merge-duplicates,return=representation"),
+                json={
+                    "id": pg_id,
+                    "producer_id": producer_uuid,
+                    "captured_by_technician_id": DEFAULT_TECH_UUID,
+                    "parcel_name": parcel_name,
+                    "municipality": municipality,
+                    "area_hectares": area_ha,
+                    "geojson_payload": geojson_payload,
+                    "eudr_status": incoming.get("eudr_status", "VERDE"),
+                    "acahual_removal_post_2020": bool(
+                        incoming.get("acahual_removal_post_2020", False)
+                    ),
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            upsert_res.raise_for_status()
+
+            tree_check = client.get(
+                f"{url}/rest/v1/shade_tree_inventories",
+                params={"parcel_id": f"eq.{pg_id}", "select": "id"},
+                headers=_pg_headers(),
+            )
+            if tree_check.status_code == 200 and len(tree_check.json()) == 0:
+                client.post(
+                    f"{url}/rest/v1/shade_tree_inventories",
+                    headers=_pg_headers(),
+                    json={
+                        "parcel_id": pg_id,
+                        "common_name": "Cedro Rojo Agroforestal",
+                        "scientific_name": "Cedrela odorata",
+                        "category": "MADERABLE",
+                        "tree_count": int(incoming.get("shade_tree_count", 110)),
+                    },
+                )
+
+            audit_check = client.get(
+                f"{url}/rest/v1/eudr_audits",
+                params={"parcel_id": f"eq.{pg_id}", "select": "id"},
+                headers=_pg_headers(),
+            )
+            if audit_check.status_code == 200 and len(audit_check.json()) == 0:
+                client.post(
+                    f"{url}/rest/v1/eudr_audits",
+                    headers=_pg_headers(),
+                    json={
+                        "parcel_id": pg_id,
+                        "status": incoming.get("eudr_status", "VERDE"),
+                        "forest_cover_loss_post_2020": bool(
+                            incoming.get("acahual_removal_post_2020", False)
+                        ),
+                        "mean_ndvi_score": round(float(incoming.get("mean_ndvi", 0.78)), 3),
+                        "sentinel_scene_id": "S2A_15QVA_20261102_1_L2A",
+                    },
+                )
+
+            accepted_ids.append(pg_id)
+
+    remote_parcels = _fetch_supabase_parcels()
+    return {
+        "server_timestamp_ms": now_ms,
+        "storage_engine": "supabase_postgis",
+        "accepted_parcel_ids": accepted_ids,
+        "remote_changed_parcels": remote_parcels,
+    }
+
+
+def _record_supabase_reception(
+    parcel_id: str,
+    delivered_dry_equivalent_kg: float,
+    requester_role: str,
+    read_point_id: str,
+) -> Dict[str, Any]:
+    parcels = _fetch_supabase_parcels(parcel_id=parcel_id)
+    if not parcels:
+        raise ValueError(f"Parcela {parcel_id} no encontrada en Supabase PostGIS.")
+
+    parcel = parcels[0]
+    admin_eval = register_epcis_reception(
+        parcel_id=parcel["parcel_id"],
+        producer_id=parcel["producer_id"],
+        read_point_id=read_point_id,
+        area_hectares=parcel["area_hectares"],
+        previous_cumulative_dry_kg=parcel["cumulative_dry_kg"],
+        delivered_dry_equivalent_kg=delivered_dry_equivalent_kg,
+        acahual_removal_post_2020=parcel["acahual_removal_post_2020"],
+        has_verified_custf_permit=parcel["has_verified_custf_permit"],
+        requester_role="admin_astra",
+    )
+
+    epcis_ev = admin_eval["epcis_event"]
+    url, _ = _get_supabase_config()
+    with httpx.Client(timeout=10.0) as client:
+        res = client.post(
+            f"{url}/rest/v1/epcis_collection_events",
+            headers=_pg_headers(),
+            json={
+                "parcel_id": parcel["parcel_id"],
+                "producer_id": parcel["producer_id"],
+                "collector_id": DEFAULT_COLLECTOR_UUID,
+                "delivered_wet_kg": round(delivered_dry_equivalent_kg * 2.5, 2),
+                "delivered_dry_equivalent_kg": delivered_dry_equivalent_kg,
+                "read_point_id": read_point_id,
+                "epcis_jsonld_payload": epcis_ev,
+                "payload_sha256": epcis_ev["payloadSha256"],
+            },
+        )
+        res.raise_for_status()
+
+    if requester_role in ("admin_astra", "auditor_sustentabilidad"):
+        return admin_eval
+
+    return {
+        "status": "REGISTERED",
+        "parcel_id": parcel["parcel_id"],
+        "producer_id": parcel["producer_id"],
+        "delivered_dry_equivalent_kg": delivered_dry_equivalent_kg,
+        "epcis_event": epcis_ev,
+    }
 
 
 def _connect(db_path: Optional[str] = None) -> sqlite3.Connection:
@@ -191,6 +569,12 @@ def _row_to_parcel_dict(row: sqlite3.Row) -> Dict[str, Any]:
 
 
 def list_persisted_parcels(db_path: Optional[str] = None) -> List[Dict[str, Any]]:
+    if is_supabase_rw_active(db_path):
+        try:
+            return _fetch_supabase_parcels()
+        except httpx.HTTPError:
+            pass
+
     init_local_db(db_path)
     with _connect(db_path) as conn:
         rows = conn.execute(
@@ -202,6 +586,9 @@ def list_persisted_parcels(db_path: Optional[str] = None) -> List[Dict[str, Any]
 def toggle_parcel_custf(
     parcel_id: str, db_path: Optional[str] = None
 ) -> Dict[str, Any]:
+    if is_supabase_rw_active(db_path):
+        return _toggle_supabase_custf(parcel_id)
+
     init_local_db(db_path)
     now_ms = int(time.time() * 1000)
     with _connect(db_path) as conn:
@@ -231,6 +618,9 @@ def sync_offline_parcels(
     pushed_parcels: List[Dict[str, Any]],
     db_path: Optional[str] = None,
 ) -> Dict[str, Any]:
+    if is_supabase_rw_active(db_path):
+        return _sync_supabase_parcels(pushed_parcels)
+
     init_local_db(db_path)
     now_ms = int(time.time() * 1000)
     accepted_ids: List[str] = []
@@ -256,7 +646,6 @@ def sync_offline_parcels(
             if existing:
                 existing_valid = bool(existing["is_topology_valid"])
                 existing_ts = int(existing["updated_at_ms"])
-                # Deterministic conflict resolution: valid topology wins, then latest timestamp.
                 if existing_valid and not lint_report["is_topology_valid"]:
                     continue
                 if existing_ts > incoming_ts and existing_valid:
@@ -320,6 +709,7 @@ def sync_offline_parcels(
 
         return {
             "server_timestamp_ms": now_ms,
+            "storage_engine": "sqlite3_local",
             "accepted_parcel_ids": accepted_ids,
             "remote_changed_parcels": [_row_to_parcel_dict(r) for r in rows],
         }
@@ -332,6 +722,14 @@ def record_persisted_reception(
     read_point_id: str = "urn:epc:id:sgln:7500000.00001.0",
     db_path: Optional[str] = None,
 ) -> Dict[str, Any]:
+    if is_supabase_rw_active(db_path):
+        return _record_supabase_reception(
+            parcel_id=parcel_id,
+            delivered_dry_equivalent_kg=delivered_dry_equivalent_kg,
+            requester_role=requester_role,
+            read_point_id=read_point_id,
+        )
+
     init_local_db(db_path)
     with _connect(db_path) as conn:
         row = conn.execute(

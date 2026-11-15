@@ -17,12 +17,17 @@ htmlcov/
 *service-account*.json
 *credentials*.json
 
-# OS / IDE
+# OS / IDE / AI Tooling
 .DS_Store
 .vscode/
 .idea/
+.agents/
+.claude/
+.cursor/
+AGENTS.md
+CLAUDE.md
+skills-lock.json
 
 # Local SQLite database
 data/*.db
 data/*.db-*
-
