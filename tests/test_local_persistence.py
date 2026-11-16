@@ -145,3 +145,56 @@ def test_historical_snapshots_are_persisted_once_with_parcel_sync(tmp_path: Path
     assert len(manifest["snapshots"]) == 7
     assert manifest["snapshots"][0]["period_key"] == "registro_actual"
     assert manifest["snapshots"][-1]["period_key"] == "hace_5_anios"
+
+
+def test_parcel_legal_documents_upload_and_download(tmp_path: Path) -> None:
+    from app.services.local_persistence_engine import (
+        get_parcel_document_file,
+        list_parcel_documents,
+        upload_parcel_document,
+    )
+
+    db_file = str(tmp_path / "test_docs.db")
+    docs_dir = tmp_path / "docs_vault"
+    sync_offline_parcels(
+        last_pulled_at_ms=None,
+        pushed_parcels=[
+            {
+                "parcel_id": "PAR-DOCS-01",
+                "producer_name": "Doña Elena",
+                "municipality": "Paraíso",
+                "area_hectares": 2.5,
+                "coordinates": [
+                    [-93.215, 18.385],
+                    [-93.211, 18.385],
+                    [-93.211, 18.382],
+                    [-93.215, 18.382],
+                ],
+            }
+        ],
+        db_path=db_file,
+    )
+
+    uploaded = upload_parcel_document(
+        parcel_id="PAR-DOCS-01",
+        document_type="CERTIFICADO_PARCELARIO",
+        file_name="certificado_ejidal.pdf",
+        file_bytes=b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n",
+        content_type="application/pdf",
+        db_path=db_file,
+        docs_dir=docs_dir,
+    )
+    assert uploaded["document_type"] == "CERTIFICADO_PARCELARIO"
+    assert uploaded["file_name"] == "certificado_ejidal.pdf"
+    assert len(uploaded["sha256_hash"]) == 64
+
+    docs = list_parcel_documents("PAR-DOCS-01", db_path=db_file)
+    assert len(docs) == 1
+    assert docs[0]["id"] == uploaded["id"]
+
+    raw_bytes, ctype, fname = get_parcel_document_file(
+        "PAR-DOCS-01", uploaded["id"], db_path=db_file
+    )
+    assert raw_bytes.startswith(b"%PDF-1.4")
+    assert ctype == "application/pdf"
+    assert fname == "certificado_ejidal.pdf"
