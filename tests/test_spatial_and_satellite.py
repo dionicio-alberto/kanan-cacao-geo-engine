@@ -159,14 +159,19 @@ def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) ->
     assert len(set(releases)) == 7
     assert len(set(dates)) == 7
     assert dates == [
-        "2026-10-29",
-        "2026-04-28",
-        "2025-11-12",
-        "2024-11-07",
-        "2023-11-14",
-        "2022-04-30",
-        "2021-03-24",
+        "2025-07-01",
+        "2024-07-01",
+        "2023-07-01",
+        "2022-07-01",
+        "2021-07-01",
+        "2020-07-01",
+        "2019-07-01",
     ]
+    assert all(r.startswith("s2cloudless-") for r in releases)
+    assert all(
+        item.get("cloud_filter_version") == "v11_sentinel2_pure"
+        for item in bundle["snapshots"]
+    )
 
     # Verifica que cambie dinámicamente al seleccionar otra fecha de referencia (2020-01-15)
     # y que descarte automáticamente tomas cubiertas por nubes (metadatos O píxeles blancos).
@@ -174,7 +179,7 @@ def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) ->
     assert is_capture_cloudy(cloud_cover_pct=10.0, tile_bytes=b"x" * 1000) is True
 
     assert format_date_ddmmyyyy("1998-11-15") == "15/11/1998"
-    assert "29/10/2026" in bundle["snapshots"][0]["label"]
+    assert "01/07/2025" in bundle["snapshots"][0]["label"]
     assert "mt1.google.com/vt/lyrs=s" in resolve_wmts_tile_url(
         "google:mt1", 17, 58859, 31535
     )
@@ -241,7 +246,7 @@ def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) ->
 
     cache_dir = Path(tmp_path) / "map_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cached_file = cache_dir / "PAR-CARRIZAL_hace_5_anios_1052.jpg"
+    cached_file = cache_dir / "PAR-CARRIZAL_s2v11_hace_5_anios_1052.jpg"
     cached_file.write_bytes(b"JPEG_CACHED_BYTES_" * 80)
     served = get_or_download_cached_parcel_map_bytes(
         "PAR-CARRIZAL", "hace_5_anios", bbox, cache_dir=cache_dir, wayback_release="1052"
