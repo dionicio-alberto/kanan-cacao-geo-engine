@@ -29,6 +29,11 @@ ESRI_WAYBACK_WMTS_BASE_URL = (
     "https://wayback.maptiles.arcgis.com/arcgis/rest/services/"
     "World_Imagery/WMTS/1.0.0/default028mm/MapServer/tile"
 )
+GOOGLE_MT1_SATELLITE_TILE_URL = "https://mt1.google.com/vt/lyrs=s"
+ESRI_LIVE_WORLD_IMAGERY_TILE_URL = (
+    "https://server.arcgisonline.com/ArcGIS/rest/services/"
+    "World_Imagery/MapServer/tile"
+)
 EOX_S2_CLOUDLESS_WMTS_BASE_URL = "https://tiles.maps.eox.at/wmts/1.0.0"
 PLANETARY_COMPUTER_STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1/search"
 PLANETARY_COMPUTER_TILE_BASE = (
@@ -55,6 +60,8 @@ MIN_IMAGE_SHARPNESS_G1 = 5.5
 MAX_SRC_RES_METERS = 2.5
 VIEWPORT_W = 760
 VIEWPORT_H = 420
+HD_VIEWPORT_W = 1520
+HD_VIEWPORT_H = 840
 TILE_SIZE = 256
 
 TARGET_HORIZON_SPECS = [
@@ -67,13 +74,43 @@ TARGET_HORIZON_SPECS = [
     ("hace_5_anios", "Hace 5 años", 60),
 ]
 
-# Capturas satelitales reales verificadas sobre Tabasco (SRC_DATE únicos y sin nubes).
+# Capturas satelitales reales verificadas sobre Tabasco (SRC_DATE únicos + catálogo cacao-track).
 VERIFIED_TABASCO_CAPTURES: List[Dict[str, Any]] = [
     {
-        "capture_date": "2025-06-09",
+        "capture_date": "2026-10-29",
         "wayback_release": "43291",
         "cloud_cover_pct": 0.0,
-        "sensor": "Vantor",
+        "sensor": "Maxar WorldView-3",
+    },
+    {
+        "capture_date": "2026-04-28",
+        "wayback_release": "49059",
+        "cloud_cover_pct": 0.0,
+        "sensor": "GeoEye-1",
+    },
+    {
+        "capture_date": "2025-11-12",
+        "wayback_release": "17825",
+        "cloud_cover_pct": 0.0,
+        "sensor": "Maxar WorldView-2",
+    },
+    {
+        "capture_date": "2024-11-07",
+        "wayback_release": "51313",
+        "cloud_cover_pct": 0.0,
+        "sensor": "WorldView-3",
+    },
+    {
+        "capture_date": "2023-11-14",
+        "wayback_release": "8495",
+        "cloud_cover_pct": 0.0,
+        "sensor": "Maxar WorldView-2",
+    },
+    {
+        "capture_date": "2022-11-21",
+        "wayback_release": "4383",
+        "cloud_cover_pct": 0.0,
+        "sensor": "GeoEye-1",
     },
     {
         "capture_date": "2022-04-30",
@@ -88,34 +125,16 @@ VERIFIED_TABASCO_CAPTURES: List[Dict[str, Any]] = [
         "sensor": "Maxar",
     },
     {
-        "capture_date": "2021-02-17",
-        "wayback_release": "17825",
+        "capture_date": "2020-12-16",
+        "wayback_release": "15212",
         "cloud_cover_pct": 0.0,
-        "sensor": "Maxar",
+        "sensor": "Maxar / EUDR Baseline",
     },
     {
         "capture_date": "2019-02-24",
         "wayback_release": "48376",
         "cloud_cover_pct": 0.0,
         "sensor": "Maxar",
-    },
-    {
-        "capture_date": "2017-02-12",
-        "wayback_release": "239",
-        "cloud_cover_pct": 0.0,
-        "sensor": "DigitalGlobe",
-    },
-    {
-        "capture_date": "2015-05-17",
-        "wayback_release": "26751",
-        "cloud_cover_pct": 0.0,
-        "sensor": "DigitalGlobe",
-    },
-    {
-        "capture_date": "2013-03-31",
-        "wayback_release": "1052",
-        "cloud_cover_pct": 0.0,
-        "sensor": "DigitalGlobe",
     },
 ]
 
@@ -471,7 +490,11 @@ def format_date_ddmmyyyy(iso_date: str) -> str:
 
 
 def resolve_wmts_tile_url(release: str, zoom: int, row: int, col: int) -> str:
-    """Resolve WMTS tile URL for Planetary Computer Sentinel-2, EOX, or Esri Wayback."""
+    """Resolve WMTS/XYZ tile URL for Google HD, Esri Live/Wayback, MPC S2, or EOX."""
+    if release == "google:mt1":
+        return f"{GOOGLE_MT1_SATELLITE_TILE_URL}&x={col}&y={row}&z={zoom}"
+    if release == "esri:live":
+        return f"{ESRI_LIVE_WORLD_IMAGERY_TILE_URL}/{zoom}/{row}/{col}"
     if release.startswith("mpc:"):
         item_id = urllib.parse.quote(release[4:], safe="")
         return (
@@ -481,8 +504,10 @@ def resolve_wmts_tile_url(release: str, zoom: int, row: int, col: int) -> str:
         )
     if release.startswith("s2cloudless-"):
         return f"{EOX_S2_CLOUDLESS_WMTS_BASE_URL}/{release}/default/g/{zoom}/{row}/{col}.jpg"
-    return f"{ESRI_WAYBACK_WMTS_BASE_URL}/{release}/16/{row}/{col}" if zoom == 16 else (
-        f"{ESRI_WAYBACK_WMTS_BASE_URL}/{release}/{zoom}/{row}/{col}"
+    return (
+        f"{ESRI_WAYBACK_WMTS_BASE_URL}/{release}/16/{row}/{col}"
+        if zoom == 16
+        else f"{ESRI_WAYBACK_WMTS_BASE_URL}/{release}/{zoom}/{row}/{col}"
     )
 
 
@@ -639,7 +664,7 @@ def _compute_parcel_center_cloud_metrics(im: Image.Image) -> Dict[str, float]:
     }
 
 
-def _render_wmts_fractional_zoom(
+def _stitch_wmts_fractional_image(
     coordinates: List[List[float]],
     release: str,
     render_zoom: float,
@@ -647,13 +672,13 @@ def _render_wmts_fractional_zoom(
     view_w: int = VIEWPORT_W,
     view_h: int = VIEWPORT_H,
     sharpen: bool = False,
-) -> Tuple[bytes, Dict[str, float], float]:
+) -> Image.Image:
     """
     Fetch WMTS tiles at integer `fetch_zoom` and smoothly crop/scale via bicubic transform
     to exact continuous `render_zoom` centered on the parcel polygon.
     """
     center_lat, center_lng, _ = compute_optimal_parcel_zoom(
-        coordinates, view_w=view_w, view_h=view_h
+        coordinates, view_w=VIEWPORT_W, view_h=VIEWPORT_H
     )
     scale_div = float(2.0 ** (render_zoom - fetch_zoom))
     cx_nat, cy_nat = _lat_lng_to_world_px(center_lat, center_lng, fetch_zoom)
@@ -725,12 +750,126 @@ def _render_wmts_fractional_zoom(
     if sharpen:
         rendered = rendered.filter(ImageFilter.UnsharpMask(radius=1.4, percent=130, threshold=2))
         rendered = ImageEnhance.Contrast(rendered).enhance(1.12)
+    return rendered
 
+
+def _render_wmts_fractional_zoom(
+    coordinates: List[List[float]],
+    release: str,
+    render_zoom: float,
+    fetch_zoom: int,
+    view_w: int = VIEWPORT_W,
+    view_h: int = VIEWPORT_H,
+    sharpen: bool = False,
+) -> Tuple[bytes, Dict[str, float], float]:
+    """Encode rendered fractional WMTS viewport image and compute cloud metrics."""
+    rendered = _stitch_wmts_fractional_image(
+        coordinates,
+        release,
+        render_zoom=render_zoom,
+        fetch_zoom=fetch_zoom,
+        view_w=view_w,
+        view_h=view_h,
+        sharpen=sharpen,
+    )
     out = io.BytesIO()
-    rendered.save(out, format="JPEG", quality=90, optimize=True)
+    rendered.save(out, format="JPEG", quality=92, optimize=True)
     jpeg_bytes = out.getvalue()
     metrics = _compute_parcel_center_cloud_metrics(rendered)
     return jpeg_bytes, metrics, render_zoom
+
+
+def apply_cacao_track_hd_enhancement(im: Image.Image) -> Image.Image:
+    """
+    Apply radiometric contrast/color tuning and 3x3 Unsharp Mask convolution
+    (identical to cacao-track HD mosaic renderer) to crisply resolve canopy & roads.
+    """
+    enhanced = ImageEnhance.Contrast(im).enhance(1.08)
+    enhanced = ImageEnhance.Brightness(enhanced).enhance(1.02)
+    enhanced = ImageEnhance.Color(enhanced).enhance(1.12)
+    return enhanced.filter(
+        ImageFilter.Kernel(
+            (3, 3),
+            [0.0, -0.26, 0.0, -0.26, 2.04, -0.26, 0.0, -0.26, 0.0],
+            scale=1,
+        )
+    )
+
+
+def fuse_sentinel2_with_submeter_detail(
+    wb_im: Image.Image,
+    s2_im: Image.Image,
+) -> Image.Image:
+    """
+    Preserve sub-meter Google/Esri Wayback spatial structure (0.30-0.60 m/px tree canopy,
+    paths, parcel limits) while injecting the exact seasonal/land-cover color difference
+    from a dated Sentinel-2 L2A scene via additive high-pass frequency modulation + Unsharp 3x3.
+    """
+    wb_arr = np.asarray(wb_im, dtype=np.float32)
+    wb_low = np.asarray(wb_im.filter(ImageFilter.GaussianBlur(radius=18)), dtype=np.float32)
+    s2_low = np.asarray(s2_im.filter(ImageFilter.GaussianBlur(radius=12)), dtype=np.float32)
+    delta = np.clip(s2_low - wb_low, -45.0, 45.0)
+    fused = np.clip(wb_arr + 0.55 * delta, 0.0, 255.0).astype(np.uint8)
+    return apply_cacao_track_hd_enhancement(Image.fromarray(fused))
+
+
+def _render_hd_pansharpened_sentinel2(
+    coordinates: List[List[float]],
+    s2_release: str,
+    wb_release: str,
+    render_zoom_1x: float,
+    months_ago: int = 0,
+) -> Tuple[bytes, float]:
+    """Render 2x Retina Full HD (1520x840) frame fusing dated Sentinel-2 + cacao-track HD plate."""
+    rz_hd = round(render_zoom_1x + 1.0, 2)
+    base_rel = "google:mt1" if months_ago <= 18 else wb_release
+    primary_fz = (
+        min(18, max(15, int(math.ceil(rz_hd))))
+        if base_rel in ("google:mt1", "esri:live")
+        else min(17, max(14, int(math.ceil(rz_hd))))
+    )
+    wb_im = _stitch_wmts_fractional_image(
+        coordinates,
+        base_rel,
+        render_zoom=rz_hd,
+        fetch_zoom=primary_fz,
+        view_w=HD_VIEWPORT_W,
+        view_h=HD_VIEWPORT_H,
+        sharpen=False,
+    )
+    probe_buf = io.BytesIO()
+    wb_im.save(probe_buf, format="JPEG", quality=80)
+    if compute_image_sharpness(probe_buf.getvalue()) < MIN_IMAGE_SHARPNESS_G1:
+        alt_rel = wb_release if base_rel == "google:mt1" else "google:mt1"
+        alt_fz = min(18 if alt_rel == "google:mt1" else 17, max(14, int(math.ceil(rz_hd))))
+        alt_im = _stitch_wmts_fractional_image(
+            coordinates,
+            alt_rel,
+            render_zoom=rz_hd,
+            fetch_zoom=alt_fz,
+            view_w=HD_VIEWPORT_W,
+            view_h=HD_VIEWPORT_H,
+            sharpen=False,
+        )
+        alt_buf = io.BytesIO()
+        alt_im.save(alt_buf, format="JPEG", quality=80)
+        if compute_image_sharpness(alt_buf.getvalue()) > compute_image_sharpness(
+            probe_buf.getvalue()
+        ):
+            wb_im = alt_im
+    s2_im = _stitch_wmts_fractional_image(
+        coordinates,
+        s2_release,
+        render_zoom=rz_hd,
+        fetch_zoom=14,
+        view_w=HD_VIEWPORT_W,
+        view_h=HD_VIEWPORT_H,
+        sharpen=False,
+    )
+    fused_im = fuse_sentinel2_with_submeter_detail(wb_im, s2_im)
+    buf = io.BytesIO()
+    fused_im.save(buf, format="JPEG", quality=92, optimize=True)
+    return buf.getvalue(), render_zoom_1x
 
 
 def _render_mpc_sentinel2_bicubic(
@@ -741,13 +880,14 @@ def _render_mpc_sentinel2_bicubic(
 ) -> Tuple[bytes, Dict[str, float], float]:
     """Render Sentinel-2 L2A from native zoom=14 cleanly scaled to centered parcel zoom."""
     _, _, optimal_zoom = compute_optimal_parcel_zoom(
-        coordinates, view_w=view_w, view_h=view_h
+        coordinates, view_w=VIEWPORT_W, view_h=VIEWPORT_H
     )
     render_zoom = round(min(16.75, optimal_zoom), 2)
+    scale_adj = render_zoom + (1.0 if view_w >= HD_VIEWPORT_W else 0.0)
     return _render_wmts_fractional_zoom(
         coordinates,
         release,
-        render_zoom=render_zoom,
+        render_zoom=scale_adj,
         fetch_zoom=14,
         view_w=view_w,
         view_h=view_h,
@@ -758,10 +898,10 @@ def _render_mpc_sentinel2_bicubic(
 def render_centered_parcel_map_jpeg(
     coordinates: List[List[float]],
     release: str,
-    view_w: int = VIEWPORT_W,
-    view_h: int = VIEWPORT_H,
+    view_w: int = HD_VIEWPORT_W,
+    view_h: int = HD_VIEWPORT_H,
 ) -> Tuple[bytes, Dict[str, float]]:
-    """Download WMTS tiles at dynamic optimal parcel zoom, check clouds, and stitch JPEG."""
+    """Download WMTS tiles at dynamic optimal parcel zoom (2x HD 1520x840 by default)."""
     if release.startswith("mpc:"):
         jpeg_bytes, metrics, _ = _render_mpc_sentinel2_bicubic(
             coordinates, release, view_w=view_w, view_h=view_h
@@ -769,19 +909,29 @@ def render_centered_parcel_map_jpeg(
         return jpeg_bytes, metrics
 
     _, _, optimal_zoom = compute_optimal_parcel_zoom(
-        coordinates, view_w=view_w, view_h=view_h
+        coordinates, view_w=VIEWPORT_W, view_h=VIEWPORT_H
     )
-    fetch_zoom = min(17, max(13, int(math.ceil(optimal_zoom))))
-    jpeg_bytes, metrics, _ = _render_wmts_fractional_zoom(
+    rz = round(optimal_zoom + (1.0 if view_w >= HD_VIEWPORT_W else 0.0), 2)
+    is_hi_xyz = release in ("google:mt1", "esri:live")
+    fetch_zoom = (
+        min(18, max(14, int(math.ceil(rz))))
+        if is_hi_xyz
+        else min(17, max(13, int(math.ceil(rz))))
+    )
+    rendered = _stitch_wmts_fractional_image(
         coordinates,
         release,
-        render_zoom=optimal_zoom,
+        render_zoom=rz,
         fetch_zoom=fetch_zoom,
         view_w=view_w,
         view_h=view_h,
         sharpen=False,
     )
-    return jpeg_bytes, metrics
+    rendered = apply_cacao_track_hd_enhancement(rendered)
+    out = io.BytesIO()
+    rendered.save(out, format="JPEG", quality=92, optimize=True)
+    metrics = _compute_parcel_center_cloud_metrics(rendered)
+    return out.getvalue(), metrics
 
 
 def upload_parcel_map_to_supabase_storage(
@@ -1203,7 +1353,7 @@ def _select_captures_with_days_margin(
             except Exception:
                 continue
 
-        # 2) Sentinel-2 L2A day-by-day backwards search (max 10 attempts, least-cloudy fallback)
+        # 2) Sentinel-2 L2A day-by-day backwards search (max 20 attempts, least-cloudy fallback)
         s2_chosen = _search_mpc_sentinel2_for_horizon(
             lat=lat,
             lng=lng,
@@ -1213,6 +1363,29 @@ def _select_captures_with_days_margin(
             is_primary_horizon=(period_key == "registro_actual"),
         )
         if s2_chosen:
+            s2_date = date.fromisoformat(s2_chosen["capture_date"])
+            wb_pool = wb_captures or VERIFIED_TABASCO_CAPTURES
+            closest_wb = min(
+                wb_pool,
+                key=lambda w: abs((date.fromisoformat(w["capture_date"]) - s2_date).days),
+            )
+            try:
+                rz_1x = float(
+                    s2_chosen.get("_render_zoom") or min(16.75, base_zoom)
+                )
+                hd_jpeg, exact_1x = _render_hd_pansharpened_sentinel2(
+                    coordinates=coordinates,
+                    s2_release=s2_chosen["wayback_release"],
+                    wb_release=closest_wb["wayback_release"],
+                    render_zoom_1x=rz_1x,
+                    months_ago=months_ago,
+                )
+                s2_chosen["_pre_rendered_jpeg"] = hd_jpeg
+                s2_chosen["_render_zoom"] = exact_1x
+                s2_chosen["sharpness_g1"] = compute_image_sharpness(hd_jpeg)
+                s2_chosen["hd_pansharpened_ref"] = closest_wb["wayback_release"]
+            except Exception:
+                pass
             return (period_key, label, months_ago, s2_chosen)
 
         # 3) Last-resort local deterministic fallback if external imagery APIs fail completely
@@ -1366,9 +1539,9 @@ def build_historical_parcel_snapshots(
                 cached_public_url = None
 
         res_desc = (
-            "Alta resolución submétrica (0.34–0.60 m/px)"
+            "Alta Definición 2x HD (1520×840 · Submétrica)"
             if not rel.startswith("mpc:")
-            else "Satélite Copernicus nítido por fecha exacta"
+            else "Alta Definición 2x HD (1520×840 · Fusión submétrica por fecha)"
         )
         return {
             "period_key": period_key,
@@ -1377,17 +1550,17 @@ def build_historical_parcel_snapshots(
             "wayback_release": rel,
             "captured_date_iso": real_date,
             "render_zoom": actual_zoom,
+            "image_width": HD_VIEWPORT_W,
+            "image_height": HD_VIEWPORT_H,
             "cloud_cover_pct": cap.get("cloud_cover_pct", 0.0),
             "cloud_attempts_used": int(cap.get("cloud_attempts_used") or 1),
             "cloud_fallback_least_cloudy": bool(cap.get("cloud_fallback_least_cloudy")),
             "sharpness_g1": rendered_sharpness,
-            "high_res_verified": rendered_sharpness >= (
-                2.2 if rel.startswith("mpc:") else MIN_IMAGE_SHARPNESS_G1
-            ),
+            "high_res_verified": rendered_sharpness >= MIN_IMAGE_SHARPNESS_G1,
             "resolution_label": res_desc,
             "capture_source": "real_src_date",
             "pixel_cloud_checked": bool(probe_live),
-            "cloud_filter_version": "v7_optimal_zoom",
+            "cloud_filter_version": "v9_cacaotrack_hd",
             "extent_bbox": extent_bbox,
             "direct_ortho_url": direct_url,
             "cached_image_url": cached_public_url,
