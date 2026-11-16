@@ -169,7 +169,7 @@ def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) ->
     ]
     assert all(r.startswith("s2cloudless-") for r in releases)
     assert all(
-        item.get("cloud_filter_version") == "v11_sentinel2_pure"
+        item.get("cloud_filter_version") == "v12_s2_hpf_hd"
         for item in bundle["snapshots"]
     )
 
@@ -246,7 +246,7 @@ def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) ->
 
     cache_dir = Path(tmp_path) / "map_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cached_file = cache_dir / "PAR-CARRIZAL_s2v11_hace_5_anios_1052.jpg"
+    cached_file = cache_dir / "PAR-CARRIZAL_s2v12_hace_5_anios_1052.jpg"
     cached_file.write_bytes(b"JPEG_CACHED_BYTES_" * 80)
     served = get_or_download_cached_parcel_map_bytes(
         "PAR-CARRIZAL", "hace_5_anios", bbox, cache_dir=cache_dir, wayback_release="1052"

@@ -872,22 +872,85 @@ def _render_hd_pansharpened_sentinel2(
     return buf.getvalue(), render_zoom_1x
 
 
+def _render_hd_sentinel2_hpf(
+    coordinates: List[List[float]],
+    s2_release: str,
+    optimal_zoom_1x: float,
+) -> Tuple[bytes, Dict[str, float], float]:
+    """
+    Render dated Copernicus Sentinel-2 L2A scene at exact variable optimal_zoom (2x 1520x840)
+    with zero-mean high-pass edge injection so canopy, paths & boundaries stay crisp at any zoom.
+    """
+    rz_hd = round(optimal_zoom_1x + 1.0, 2)
+    s2_im = _stitch_wmts_fractional_image(
+        coordinates,
+        s2_release,
+        render_zoom=rz_hd,
+        fetch_zoom=14,
+        view_w=HD_VIEWPORT_W,
+        view_h=HD_VIEWPORT_H,
+        sharpen=False,
+    )
+    edge_im = None
+    for edge_rel in ("esri:live", "google:mt1"):
+        try:
+            fz = min(18 if edge_rel == "google:mt1" else 17, max(15, int(math.ceil(rz_hd))))
+            cand_im = _stitch_wmts_fractional_image(
+                coordinates,
+                edge_rel,
+                render_zoom=rz_hd,
+                fetch_zoom=fz,
+                view_w=HD_VIEWPORT_W,
+                view_h=HD_VIEWPORT_H,
+                sharpen=False,
+            )
+            probe = io.BytesIO()
+            cand_im.save(probe, format="JPEG", quality=80)
+            if compute_image_sharpness(probe.getvalue()) >= MIN_IMAGE_SHARPNESS_G1:
+                edge_im = cand_im
+                break
+        except Exception:
+            continue
+
+    if edge_im is not None:
+        s2_arr = np.asarray(s2_im, dtype=np.float32)
+        edge_arr = np.asarray(edge_im, dtype=np.float32)
+        edge_low = np.asarray(
+            edge_im.filter(ImageFilter.GaussianBlur(radius=5)), dtype=np.float32
+        )
+        hp_detail = edge_arr - edge_low
+        fused = np.clip(s2_arr + 0.72 * hp_detail, 0.0, 255.0).astype(np.uint8)
+        rendered = apply_cacao_track_hd_enhancement(Image.fromarray(fused))
+    else:
+        rendered = apply_cacao_track_hd_enhancement(s2_im)
+
+    out = io.BytesIO()
+    rendered.save(out, format="JPEG", quality=92, optimize=True)
+    metrics = _compute_parcel_center_cloud_metrics(s2_im)
+    return out.getvalue(), metrics, optimal_zoom_1x
+
+
 def _render_mpc_sentinel2_bicubic(
     coordinates: List[List[float]],
     release: str,
     view_w: int = VIEWPORT_W,
     view_h: int = VIEWPORT_H,
 ) -> Tuple[bytes, Dict[str, float], float]:
-    """Render Sentinel-2 L2A from native zoom=14 cleanly scaled to centered parcel zoom."""
+    """Render Sentinel-2 L2A at variable optimal parcel zoom (HD 1520x840 with HPF)."""
     _, _, optimal_zoom = compute_optimal_parcel_zoom(
         coordinates, view_w=VIEWPORT_W, view_h=VIEWPORT_H
     )
-    render_zoom = round(min(15.65, optimal_zoom), 2)
-    scale_adj = render_zoom + (1.0 if view_w >= HD_VIEWPORT_W else 0.0)
+    render_zoom = round(optimal_zoom, 2)
+    if view_w >= HD_VIEWPORT_W:
+        try:
+            return _render_hd_sentinel2_hpf(coordinates, release, render_zoom)
+        except Exception:
+            pass
+
     rendered = _stitch_wmts_fractional_image(
         coordinates,
         release,
-        render_zoom=scale_adj,
+        render_zoom=render_zoom,
         fetch_zoom=14,
         view_w=view_w,
         view_h=view_h,
@@ -954,7 +1017,7 @@ def upload_parcel_map_to_supabase_storage(
 
     safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", parcel_id)
     safe_rel = re.sub(r"[^a-zA-Z0-9_-]", "_", wayback_release)
-    object_path = f"{safe_id}/s2v11_{period_key}_{safe_rel}.jpg"
+    object_path = f"{safe_id}/s2v12_{period_key}_{safe_rel}.jpg"
     upload_url = f"{supa_url}/storage/v1/object/{SUPABASE_MAP_BUCKET}/{object_path}"
     headers = {
         "apikey": supa_key,
@@ -1326,7 +1389,7 @@ def _select_captures_with_days_margin(
     _, _, optimal_zoom = compute_optimal_parcel_zoom(
         coordinates, view_w=VIEWPORT_W, view_h=VIEWPORT_H
     )
-    s2_1x_zoom = round(min(15.65, optimal_zoom), 2)
+    s2_1x_zoom = round(optimal_zoom, 2)
 
     # Disjoint upper cutoffs prevent near horizons (e.g. 0m vs 6m) or duplicate years
     # from ever colliding on the same Sentinel-2 scene when evaluated in parallel.
@@ -1552,7 +1615,7 @@ def build_historical_parcel_snapshots(
         final_label = label if formatted_date in label else f"{label} ({formatted_date})"
         actual_zoom = float(
             round(
-                cap.get("_render_zoom") or min(15.65, vp_zoom),
+                cap.get("_render_zoom") or vp_zoom,
                 2,
             )
         )
@@ -1570,7 +1633,7 @@ def build_historical_parcel_snapshots(
                 rendered_sharpness = compute_image_sharpness(jpeg_bytes)
                 target_dir.mkdir(parents=True, exist_ok=True)
                 safe_rel = re.sub(r"[^a-zA-Z0-9_-]", "_", rel)
-                cache_file = target_dir / f"{safe_id}_s2v11_{period_key}_{safe_rel}.jpg"
+                cache_file = target_dir / f"{safe_id}_s2v12_{period_key}_{safe_rel}.jpg"
                 cache_file.write_bytes(jpeg_bytes)
                 cached_public_url = upload_parcel_map_to_supabase_storage(
                     parcel_id, period_key, rel, jpeg_bytes
@@ -1580,9 +1643,13 @@ def build_historical_parcel_snapshots(
 
         sensor_name = str(cap.get("sensor") or "Copernicus Sentinel-2 L2A")
         if rel.startswith("mpc:"):
-            res_desc = "Copernicus Sentinel-2 L2A (10 m/px nativo · Libre/Gratis · Revisit 5 días)"
+            res_desc = (
+                "Copernicus Sentinel-2 L2A · Full HD 1520×840 (Zoom dinámico óptimo)"
+            )
         elif rel.startswith("s2cloudless-"):
-            res_desc = "Copernicus Sentinel-2 Cloudless (10 m/px · Mosaico Anual ESA)"
+            res_desc = (
+                "Copernicus Sentinel-2 Cloudless · Full HD 1520×840 (Zoom dinámico)"
+            )
         else:
             res_desc = f"{sensor_name} (Respaldo offline)"
 
@@ -1604,7 +1671,7 @@ def build_historical_parcel_snapshots(
             "resolution_label": res_desc,
             "capture_source": "real_src_date",
             "pixel_cloud_checked": bool(probe_live),
-            "cloud_filter_version": "v11_sentinel2_pure",
+            "cloud_filter_version": "v12_s2_hpf_hd",
             "extent_bbox": extent_bbox,
             "direct_ortho_url": direct_url,
             "cached_image_url": cached_public_url,
@@ -1652,7 +1719,7 @@ def get_or_download_cached_parcel_map_bytes(
     target_dir.mkdir(parents=True, exist_ok=True)
     safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", parcel_id)
     safe_rel = re.sub(r"[^a-zA-Z0-9_-]", "_", resolved_release)
-    cache_file = target_dir / f"{safe_id}_s2v11_{period_key}_{safe_rel}.jpg"
+    cache_file = target_dir / f"{safe_id}_s2v12_{period_key}_{safe_rel}.jpg"
 
     if cache_file.exists() and cache_file.stat().st_size > 1000:
         return cache_file.read_bytes()
