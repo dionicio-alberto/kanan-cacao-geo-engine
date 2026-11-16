@@ -2,10 +2,11 @@
 
 import calendar
 from datetime import datetime, timezone
+import math
 import os
 from pathlib import Path
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import httpx
 from app.core.config import EUDR_CUTOFF_DATE_ISO, EUDR_LEGAL_DISCLAIMER
 from app.services.topology_engine import lint_and_validate_polygon
@@ -15,6 +16,10 @@ ESRI_WORLD_IMAGERY_EXPORT_URL = (
     "https://services.arcgisonline.com/ArcGIS/rest/services/"
     "World_Imagery/MapServer/export"
 )
+ESRI_WAYBACK_WMTS_BASE_URL = (
+    "https://wayback.maptiles.arcgis.com/arcgis/rest/services/"
+    "World_Imagery/WMTS/1.0.0/default028mm/MapServer/tile"
+)
 DEFAULT_MAP_CACHE_DIR = Path(
     os.environ.get(
         "KANAN_MAP_CACHE_DIR",
@@ -22,14 +27,15 @@ DEFAULT_MAP_CACHE_DIR = Path(
     )
 )
 
+# (period_key, label, months_ago, wayback_release, capture_date_label)
 HISTORICAL_PERIOD_SPECS = [
-    ("registro_actual", "Última foto al momento del registro", 0),
-    ("hace_6_meses", "Hace 6 meses", 6),
-    ("hace_1_anio", "Hace 1 año", 12),
-    ("hace_2_anios", "Hace 2 años", 24),
-    ("hace_3_anios", "Hace 3 años", 36),
-    ("hace_4_anios", "Hace 4 años", 48),
-    ("hace_5_anios", "Hace 5 años", 60),
+    ("registro_actual", "Última foto al momento del registro", 0, "43291", "2026-10-29"),
+    ("hace_6_meses", "Hace 6 meses", 6, "10842", "2026-05-28"),
+    ("hace_1_anio", "Hace 1 año", 12, "52930", "2024-05-09"),
+    ("hace_2_anios", "Hace 2 años", 24, "46399", "2023-05-03"),
+    ("hace_3_anios", "Hace 3 años", 36, "4905", "2022-06-29"),
+    ("hace_4_anios", "Hace 4 años", 48, "8432", "2021-07-21"),
+    ("hace_5_anios", "Hace 5 años", 60, "26751", "2020-04-08"),
 ]
 
 
@@ -258,6 +264,16 @@ def _build_ortho_export_url(extent_bbox: List[float], epoch_ms: Optional[int] = 
     return base_url
 
 
+def _lat_lng_to_tile_row_col(
+    lat: float, lng: float, zoom: int = 16
+) -> Tuple[int, int]:
+    n = 2 ** zoom
+    col = int((lng + 180.0) / 360.0 * n)
+    lat_rad = math.radians(max(-85.051128, min(85.051128, lat)))
+    row = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
+    return row, col
+
+
 def build_historical_parcel_snapshots(
     parcel_id: str,
     raw_coordinates: List[List[float]],
@@ -265,12 +281,16 @@ def build_historical_parcel_snapshots(
 ) -> Dict[str, Any]:
     """
     Build the 7-point historical satellite manifest (current, 6m, 1y, 2y, 3y, 4y, 5y)
-    centered on the parcel polygon so it can be persisted once on the server.
+    backed by distinct Esri Wayback releases centered on the parcel polygon.
     """
     topology = lint_and_validate_polygon(raw_coordinates)
     ring = topology["polygon"]["coordinates"][0]
     raw_bbox = build_bbox_and_ortho_url(ring)["bbox"]
     extent_bbox = fit_bbox_to_aspect_ratio(raw_bbox, target_aspect=1.75)
+
+    center_lng = sum(float(pt[0]) for pt in ring) / len(ring)
+    center_lat = sum(float(pt[1]) for pt in ring) / len(ring)
+    row, col = _lat_lng_to_tile_row_col(center_lat, center_lng, zoom=16)
 
     if registered_at_iso:
         try:
@@ -281,17 +301,18 @@ def build_historical_parcel_snapshots(
         anchor = datetime.now(timezone.utc)
 
     snapshots: List[Dict[str, Any]] = []
-    for period_key, label, months_ago in HISTORICAL_PERIOD_SPECS:
+    for period_key, label, months_ago, wayback_release, ref_date in HISTORICAL_PERIOD_SPECS:
         snap_dt = _subtract_months(anchor, months_ago) if months_ago > 0 else anchor
-        epoch_ms = int(snap_dt.timestamp() * 1000) if months_ago > 0 else None
+        wayback_url = f"{ESRI_WAYBACK_WMTS_BASE_URL}/{wayback_release}/16/{row}/{col}"
         snapshots.append(
             {
                 "period_key": period_key,
                 "label": label,
                 "months_ago": months_ago,
-                "captured_date_iso": snap_dt.date().isoformat(),
+                "wayback_release": wayback_release,
+                "captured_date_iso": ref_date or snap_dt.date().isoformat(),
                 "extent_bbox": extent_bbox,
-                "direct_ortho_url": _build_ortho_export_url(extent_bbox, epoch_ms),
+                "direct_ortho_url": wayback_url,
                 "server_cached_image_path": (
                     f"/api/v1/parcels/{parcel_id}/historical-image/{period_key}"
                 ),
@@ -314,27 +335,27 @@ def get_or_download_cached_parcel_map_bytes(
     months_ago: int = 0,
     cache_dir: Optional[Path] = None,
 ) -> bytes:
-    """Return cached JPEG bytes from server disk or download once and persist."""
-    valid_keys = {spec[0]: spec[2] for spec in HISTORICAL_PERIOD_SPECS}
-    if period_key not in valid_keys:
+    """Return cached JPEG bytes from server disk or download Wayback release once."""
+    spec_map = {spec[0]: spec for spec in HISTORICAL_PERIOD_SPECS}
+    if period_key not in spec_map:
         raise ValueError(f"Periodo histórico inválido: {period_key}")
 
+    wayback_release = spec_map[period_key][3]
     target_dir = cache_dir or DEFAULT_MAP_CACHE_DIR
     target_dir.mkdir(parents=True, exist_ok=True)
     safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", parcel_id)
-    cache_file = target_dir / f"{safe_id}_{period_key}.jpg"
+    cache_file = target_dir / f"{safe_id}_{period_key}_{wayback_release}.jpg"
 
     if cache_file.exists() and cache_file.stat().st_size > 100:
         return cache_file.read_bytes()
 
-    effective_months = valid_keys[period_key] if months_ago == 0 else months_ago
-    anchor = datetime.now(timezone.utc)
-    snap_dt = _subtract_months(anchor, effective_months) if effective_months > 0 else anchor
-    epoch_ms = int(snap_dt.timestamp() * 1000) if effective_months > 0 else None
-    ortho_url = _build_ortho_export_url(extent_bbox, epoch_ms)
+    center_lng = (float(extent_bbox[0]) + float(extent_bbox[2])) / 2.0
+    center_lat = (float(extent_bbox[1]) + float(extent_bbox[3])) / 2.0
+    row, col = _lat_lng_to_tile_row_col(center_lat, center_lng, zoom=16)
+    wayback_url = f"{ESRI_WAYBACK_WMTS_BASE_URL}/{wayback_release}/16/{row}/{col}"
 
     with httpx.Client(timeout=12.0, follow_redirects=True) as client:
-        resp = client.get(ortho_url)
+        resp = client.get(wayback_url)
         resp.raise_for_status()
         img_bytes = resp.content
 

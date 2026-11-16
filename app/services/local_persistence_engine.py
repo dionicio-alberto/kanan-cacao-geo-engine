@@ -208,9 +208,13 @@ def supabase_row_to_parcel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
 
     persisted_snapshots = properties.get("historical_snapshots")
     persisted_bbox = properties.get("extent_bbox")
-    if (
+    has_wayback = (
         isinstance(persisted_snapshots, list)
         and len(persisted_snapshots) == 7
+        and all(bool(item.get("wayback_release")) for item in persisted_snapshots)
+    )
+    if (
+        has_wayback
         and isinstance(persisted_bbox, list)
         and len(persisted_bbox) == 4
     ):
