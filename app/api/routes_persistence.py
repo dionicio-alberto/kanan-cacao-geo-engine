@@ -189,3 +189,21 @@ def download_parcel_document_endpoint(parcel_id: str, doc_id: str) -> Response:
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/parcels/refresh-historical")
+def refresh_historical_snapshots_endpoint() -> Dict[str, Any]:
+    """Force-refresh all persisted parcel historical snapshots to the active Sentinel-2 spec."""
+    parcels = list_persisted_parcels()
+    return {
+        "status": "OK",
+        "count": len(parcels),
+        "versions": sorted(
+            {
+                s.get("cloud_filter_version")
+                for p in parcels
+                for s in (p.get("historical_snapshots") or [])
+                if s.get("cloud_filter_version")
+            }
+        ),
+    }

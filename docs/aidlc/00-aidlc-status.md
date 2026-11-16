@@ -1,7 +1,7 @@
 # AI-DLC Framework · Estado Actual Consolidado (`kanan-cacao-geo-engine`)
 
 **Repositorio:** `kanan-cacao-geo-engine` (FastAPI + Python Geoespacial + Planetary Computer / WMTS + Supabase)  
-**Última actualización:** `16/11/2026` · **Versión activa:** `v0.13.2` (`v10_sentinel2_standard`)
+**Última actualización:** `16/11/2026` · **Versión activa:** `v0.14.0` (`v11_sentinel2_pure`)
 
 ---
 
@@ -16,7 +16,8 @@
 | Zoom Dinámico | `v0.12.0` | [`05-v7-optimal-parcel-zoom-spec.md`](./05-v7-optimal-parcel-zoom-spec.md) | Completado (`main`) | Función `compute_optimal_parcel_zoom` (`fill_ratio = 0.58`) adaptativa al tamaño en hectáreas y recortador fraccional `_render_wmts_fractional_zoom`. |
 | Alta Definición 2x | `v0.13.0` | [`06-v8-hd-1520-pansharpened-spec.md`](./06-v8-hd-1520-pansharpened-spec.md) | Completado (`main`) | Ensamblado cuadro-a-cuadro **1520×840** y realce óptico 3×3 `apply_cacao_track_hd_enhancement`. |
 | Auditoría Multitemporal | `v0.13.1` | [`11-georef-loading-and-satellite-multitemporal-spec.md`](../../../kanan-cacao-web/docs/aidlc/11-georef-loading-and-satellite-multitemporal-spec.md) | Completado (`main`) | Diagnóstico matemático de multitemporalidad satelital en Comalcalco (`Test Terreno`) y reutilización de caché en servidor. |
-| **Estándar Sentinel-2** | **`v0.13.2`** | [`07-v10-sentinel2-standardization-spec.md`](./07-v10-sentinel2-standardization-spec.md) | **Completado (`main`)** | Estandarización soberana en **Copernicus Sentinel-2 L2A** (revisita 5 días, gratuito) + respaldo **Sentinel-2 Cloudless EOX ESA** y caché `v10_sentinel2_standard`. |
+| **Estándar Sentinel-2** | `v0.13.2` | [`07-v10-sentinel2-standardization-spec.md`](./07-v10-sentinel2-standardization-spec.md) | Completado (`main`) | Estandarización soberana en **Copernicus Sentinel-2 L2A** (revisita 5 días, gratuito) + respaldo **Sentinel-2 Cloudless EOX ESA** y caché `v10_sentinel2_standard`. |
+| **Histórico Puro S2** | **`v0.14.0`** | [`08-v11-sentinel2-pure-historic-fix-spec.md`](./08-v11-sentinel2-pure-historic-fix-spec.md) | **Completado (`main`)** | URL versionada `s2v11_`, 0 colisiones entre horizontes (`7/7` fechas/escenas/MD5 únicos), alineación `render_zoom` 1x en Sentinel-2 puro, hidratación paralela y `/parcels/refresh-historical`. |
 
 ---
 
