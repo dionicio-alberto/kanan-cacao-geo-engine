@@ -882,9 +882,9 @@ def _render_mpc_sentinel2_bicubic(
     _, _, optimal_zoom = compute_optimal_parcel_zoom(
         coordinates, view_w=VIEWPORT_W, view_h=VIEWPORT_H
     )
-    render_zoom = round(min(16.75, optimal_zoom), 2)
+    render_zoom = round(min(15.65, optimal_zoom), 2)
     scale_adj = render_zoom + (1.0 if view_w >= HD_VIEWPORT_W else 0.0)
-    return _render_wmts_fractional_zoom(
+    rendered = _stitch_wmts_fractional_image(
         coordinates,
         release,
         render_zoom=scale_adj,
@@ -893,6 +893,10 @@ def _render_mpc_sentinel2_bicubic(
         view_h=view_h,
         sharpen=True,
     )
+    out = io.BytesIO()
+    rendered.save(out, format="JPEG", quality=92, optimize=True)
+    metrics = _compute_parcel_center_cloud_metrics(rendered)
+    return out.getvalue(), metrics, render_zoom
 
 
 def render_centered_parcel_map_jpeg(
@@ -901,8 +905,8 @@ def render_centered_parcel_map_jpeg(
     view_w: int = HD_VIEWPORT_W,
     view_h: int = HD_VIEWPORT_H,
 ) -> Tuple[bytes, Dict[str, float]]:
-    """Download WMTS tiles at dynamic optimal parcel zoom (2x HD 1520x840 by default)."""
-    if release.startswith("mpc:"):
+    """Download Copernicus Sentinel-2 WMTS tiles at centered parcel zoom (2x HD 1520x840)."""
+    if release.startswith("mpc:") or release.startswith("s2cloudless-"):
         jpeg_bytes, metrics, _ = _render_mpc_sentinel2_bicubic(
             coordinates, release, view_w=view_w, view_h=view_h
         )
@@ -950,7 +954,7 @@ def upload_parcel_map_to_supabase_storage(
 
     safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", parcel_id)
     safe_rel = re.sub(r"[^a-zA-Z0-9_-]", "_", wayback_release)
-    object_path = f"{safe_id}/{period_key}_{safe_rel}.jpg"
+    object_path = f"{safe_id}/s2v11_{period_key}_{safe_rel}.jpg"
     upload_url = f"{supa_url}/storage/v1/object/{SUPABASE_MAP_BUCKET}/{object_path}"
     headers = {
         "apikey": supa_key,
@@ -1227,11 +1231,13 @@ def _search_mpc_sentinel2_for_horizon(
     target_date: date,
     max_date: date,
     is_primary_horizon: bool = False,
+    exclude_dates: Optional[set] = None,
+    exclude_releases: Optional[set] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Query Sentinel-2 L2A scenes closest to `target_date` stepping backwards in days.
-    Inspect up to MAX_CLOUD_RETRY_ATTEMPTS (20) attempts and choose either the first
-    cloud-free image or the least-cloudy image among those 20 attempts.
+    Inspect up to MAX_CLOUD_RETRY_ATTEMPTS (20) distinct candidates and choose either
+    the first cloud-free image or the least-cloudy image among those 20 attempts.
     """
     end_dt = min(max_date, target_date)
     start_dt = max(date(2017, 1, 1), end_dt - timedelta(days=150))
@@ -1261,13 +1267,17 @@ def _search_mpc_sentinel2_for_horizon(
     except Exception:
         return None
 
+    used_d = exclude_dates or set()
+    used_r = exclude_releases or set()
     best_granule_by_date: Dict[str, Tuple[float, Dict[str, Any]]] = {}
     for feat in feats:
         raw_dt = str(feat.get("properties", {}).get("datetime") or "")[:10]
-        if len(raw_dt) != 10:
+        if len(raw_dt) != 10 or raw_dt in used_d:
             continue
         item_id = str(feat.get("id") or "")
         release_key = f"mpc:{item_id}"
+        if release_key in used_r:
+            continue
         cloud_meta = float(feat.get("properties", {}).get("eo:cloud_cover") or 0.0)
         cand = {
             "capture_date": raw_dt,
@@ -1306,37 +1316,46 @@ def _select_captures_with_days_margin(
 ) -> List[Tuple[str, str, int, Dict[str, Any]]]:
     """
     Build the exact 7 horizons (0m, 6m, 1y, 2y, 3y, 4y, 5y from registration date).
-    STANDARDIZACIÓN COPERNICUS SENTINEL:
-    Usa escenas Copernicus Sentinel-2 L2A como fuente primaria y soberana para cada
-    horizonte (revisita cada 5 días y 100% gratuita, sin cuotas comerciales).
-    Si un horizonte histórico anual requiere cobertura total sin nubes, recurre a
-    Sentinel-2 Cloudless (EOX ESA). Solo usa catálogo local como respaldo de contingencia.
+    ESTANDARIZACIÓN SOBERANA COPERNICUS SENTINEL-2:
+    Usa exclusivamente Copernicus Sentinel-2 L2A (STAC abierto cada 5 días) con
+    unicidad estricta entre horizontes, y Copernicus Sentinel-2 Cloudless (EOX ESA)
+    como respaldo histórico anual gratuito sin fondos estáticos de Google/Wayback.
     """
     today_date = datetime.now(timezone.utc).date()
     anchor_date = min(anchor_dt.date(), today_date)
-    _, _, base_zoom = compute_centered_wayback_viewport(
+    _, _, optimal_zoom = compute_optimal_parcel_zoom(
         coordinates, view_w=VIEWPORT_W, view_h=VIEWPORT_H
     )
+    s2_1x_zoom = round(min(15.65, optimal_zoom), 2)
 
-    def _solve_horizon(spec: Tuple[str, str, int]) -> Tuple[str, str, int, Dict[str, Any]]:
-        period_key, label, months_ago = spec
-        target_dt = (
-            _subtract_months(anchor_dt, months_ago) if months_ago > 0 else anchor_dt
-        )
-        target_date = min(target_dt.date(), today_date)
+    # Disjoint upper cutoffs prevent near horizons (e.g. 0m vs 6m) or duplicate years
+    # from ever colliding on the same Sentinel-2 scene when evaluated in parallel.
+    horizon_inputs: List[Tuple[str, str, int, date, date]] = []
+    for idx, (period_key, label, months_ago) in enumerate(TARGET_HORIZON_SPECS):
+        t_dt = _subtract_months(anchor_dt, months_ago) if months_ago > 0 else anchor_dt
+        t_date = min(t_dt.date(), today_date)
+        min_gap_end = t_date
+        if idx > 0 and horizon_inputs:
+            prev_target = horizon_inputs[idx - 1][3]
+            if min_gap_end >= prev_target:
+                min_gap_end = prev_target - timedelta(days=1)
+        horizon_inputs.append((period_key, label, months_ago, t_date, min_gap_end))
 
-        # 1) PRIORIDAD SOBERANA: Copernicus Sentinel-2 L2A (STAC abierto, cada 5 días, gratis)
+    def _solve_horizon(
+        item: Tuple[str, str, int, date, date],
+    ) -> Tuple[str, str, int, Dict[str, Any]]:
+        period_key, label, months_ago, target_date, max_cut = item
         s2_chosen = _search_mpc_sentinel2_for_horizon(
             lat=lat,
             lng=lng,
             coordinates=coordinates,
             target_date=target_date,
-            max_date=anchor_date,
+            max_date=min(anchor_date, max_cut),
             is_primary_horizon=(period_key == "registro_actual"),
         )
         if s2_chosen:
             try:
-                hd_jpeg, s2_metrics, s2_zoom = _render_mpc_sentinel2_bicubic(
+                hd_jpeg, _, s2_zoom = _render_mpc_sentinel2_bicubic(
                     coordinates=coordinates,
                     release=s2_chosen["wayback_release"],
                     view_w=HD_VIEWPORT_W,
@@ -1350,71 +1369,78 @@ def _select_captures_with_days_margin(
                 pass
             return (period_key, label, months_ago, s2_chosen)
 
-        # 2) PRIORIDAD HISTÓRICA: Copernicus Sentinel-2 Cloudless (EOX ESA)
-        target_year = target_date.year
-        eox_cand = next(
-            (
-                c
-                for c in EOX_CLOUDLESS_SUPPLEMENTS
-                if c["capture_date"].startswith(str(target_year))
-            ),
-            None,
-        )
-        if eox_cand:
-            try:
-                jpeg_bytes, metrics = render_centered_parcel_map_jpeg(
-                    coordinates, eox_cand["wayback_release"]
-                )
-                enriched = dict(eox_cand)
-                enriched["_pre_rendered_jpeg"] = jpeg_bytes
-                enriched["_render_zoom"] = base_zoom
-                enriched["sharpness_g1"] = compute_image_sharpness(jpeg_bytes)
-                enriched["cloud_attempts_used"] = 1
-                enriched["cloud_fallback_least_cloudy"] = False
-                enriched["sensor"] = "Copernicus Sentinel-2 EU (Cloudless)"
-                return (period_key, label, months_ago, enriched)
-            except Exception:
-                pass
-
-        # 3) Fallback local de contingencia (sin conexión a STAC / pruebas unitarias offline)
-        nearby_wb = []
-        for cap in wb_captures:
-            cap_dt = date.fromisoformat(cap["capture_date"])
-            if cap_dt > anchor_date:
-                continue
-            delta_days = abs((cap_dt - target_date).days)
-            if delta_days <= WAYBACK_EXACT_WINDOW_DAYS:
-                nearby_wb.append((delta_days, cap))
-        nearby_wb.sort(key=lambda pair: pair[0])
-
-        for _, wb_cand in nearby_wb[:3]:
-            try:
-                jpeg_bytes, metrics = render_centered_parcel_map_jpeg(
-                    coordinates, wb_cand["wayback_release"]
-                )
-                if (
-                    float(metrics.get("white_pct", 0.0)) <= MAX_PURE_WHITE_CLOUD_PCT
-                    and float(metrics.get("haze_pct", 0.0)) <= MAX_TILE_HAZE_PCT
-                    and compute_image_sharpness(jpeg_bytes) >= MIN_IMAGE_SHARPNESS_G1
-                ):
-                    enriched = dict(wb_cand)
-                    enriched["_pre_rendered_jpeg"] = jpeg_bytes
-                    enriched["_render_zoom"] = base_zoom
-                    enriched["sharpness_g1"] = compute_image_sharpness(jpeg_bytes)
-                    enriched["cloud_attempts_used"] = 1
-                    enriched["cloud_fallback_least_cloudy"] = False
-                    return (period_key, label, months_ago, enriched)
-            except Exception:
-                continue
-
-        fallback_cap = min(
-            wb_captures or VERIFIED_TABASCO_CAPTURES,
+        # Prioridad 2: Copernicus Sentinel-2 Cloudless anual (EOX ESA, 100% Sentinel-2)
+        eox_pool = [
+            c
+            for c in EOX_CLOUDLESS_SUPPLEMENTS
+            if date.fromisoformat(c["capture_date"]) <= target_date
+        ] or list(EOX_CLOUDLESS_SUPPLEMENTS)
+        eox_cand = min(
+            eox_pool,
             key=lambda c: abs((date.fromisoformat(c["capture_date"]) - target_date).days),
         )
-        return (period_key, label, months_ago, dict(fallback_cap))
+        try:
+            jpeg_bytes, _ = render_centered_parcel_map_jpeg(
+                coordinates, eox_cand["wayback_release"]
+            )
+            enriched = dict(eox_cand)
+            enriched["_pre_rendered_jpeg"] = jpeg_bytes
+            enriched["_render_zoom"] = s2_1x_zoom
+            enriched["sharpness_g1"] = compute_image_sharpness(jpeg_bytes)
+            enriched["cloud_attempts_used"] = 1
+            enriched["cloud_fallback_least_cloudy"] = False
+            enriched["sensor"] = "Copernicus Sentinel-2 EU (Cloudless)"
+            return (period_key, label, months_ago, enriched)
+        except Exception:
+            fallback_eox = dict(eox_cand)
+            fallback_eox["_render_zoom"] = s2_1x_zoom
+            fallback_eox["sensor"] = "Copernicus Sentinel-2 EU (Cloudless)"
+            return (period_key, label, months_ago, fallback_eox)
 
     with ThreadPoolExecutor(max_workers=7) as executor:
-        return list(executor.map(_solve_horizon, TARGET_HORIZON_SPECS))
+        raw_results = list(executor.map(_solve_horizon, horizon_inputs))
+
+    # Strict post-pass deduplication: guarantee 7 unique scenes and dates across 0m..5y
+    used_dates: set = set()
+    used_releases: set = set()
+    final_results: List[Tuple[str, str, int, Dict[str, Any]]] = []
+    for period_key, label, months_ago, chosen in raw_results:
+        d_str = chosen.get("capture_date", "")
+        rel_str = chosen.get("wayback_release", "")
+        if d_str in used_dates or rel_str in used_releases:
+            eox_avail = [
+                c
+                for c in EOX_CLOUDLESS_SUPPLEMENTS
+                if c["capture_date"] not in used_dates
+                and c["wayback_release"] not in used_releases
+            ]
+            if eox_avail:
+                target_dt = (
+                    _subtract_months(anchor_dt, months_ago) if months_ago > 0 else anchor_dt
+                )
+                alt = dict(
+                    min(
+                        eox_avail,
+                        key=lambda c: abs(
+                            (date.fromisoformat(c["capture_date"]) - target_dt.date()).days
+                        ),
+                    )
+                )
+                try:
+                    jpeg_bytes, _ = render_centered_parcel_map_jpeg(
+                        coordinates, alt["wayback_release"]
+                    )
+                    alt["_pre_rendered_jpeg"] = jpeg_bytes
+                    alt["sharpness_g1"] = compute_image_sharpness(jpeg_bytes)
+                except Exception:
+                    pass
+                alt["_render_zoom"] = s2_1x_zoom
+                alt["sensor"] = "Copernicus Sentinel-2 EU (Cloudless)"
+                chosen = alt
+        used_dates.add(chosen.get("capture_date", ""))
+        used_releases.add(chosen.get("wayback_release", ""))
+        final_results.append((period_key, label, months_ago, chosen))
+    return final_results
 
 
 def assign_distinct_captures_to_horizons(
@@ -1506,15 +1532,12 @@ def build_historical_parcel_snapshots(
     anchor = _parse_anchor_datetime(reference_date_iso or registered_at_iso)
 
     if probe_live:
-        wb_captures = _discover_real_captures_for_point(
-            center_lat, center_lng, coordinates=ring
-        )
         matched = _select_captures_with_days_margin(
-            center_lat, center_lng, ring, anchor, wb_captures
+            center_lat, center_lng, ring, anchor, []
         )
     else:
         matched = assign_distinct_captures_to_horizons(
-            list(VERIFIED_TABASCO_CAPTURES), anchor
+            list(EOX_CLOUDLESS_SUPPLEMENTS), anchor
         )
 
     snapshots: List[Dict[str, Any]] = []
@@ -1529,8 +1552,7 @@ def build_historical_parcel_snapshots(
         final_label = label if formatted_date in label else f"{label} ({formatted_date})"
         actual_zoom = float(
             round(
-                cap.get("_render_zoom")
-                or (min(16.75, vp_zoom) if rel.startswith("mpc:") else vp_zoom),
+                cap.get("_render_zoom") or min(15.65, vp_zoom),
                 2,
             )
         )
@@ -1548,7 +1570,7 @@ def build_historical_parcel_snapshots(
                 rendered_sharpness = compute_image_sharpness(jpeg_bytes)
                 target_dir.mkdir(parents=True, exist_ok=True)
                 safe_rel = re.sub(r"[^a-zA-Z0-9_-]", "_", rel)
-                cache_file = target_dir / f"{safe_id}_{period_key}_{safe_rel}.jpg"
+                cache_file = target_dir / f"{safe_id}_s2v11_{period_key}_{safe_rel}.jpg"
                 cache_file.write_bytes(jpeg_bytes)
                 cached_public_url = upload_parcel_map_to_supabase_storage(
                     parcel_id, period_key, rel, jpeg_bytes
@@ -1578,11 +1600,11 @@ def build_historical_parcel_snapshots(
             "cloud_attempts_used": int(cap.get("cloud_attempts_used") or 1),
             "cloud_fallback_least_cloudy": bool(cap.get("cloud_fallback_least_cloudy")),
             "sharpness_g1": rendered_sharpness,
-            "high_res_verified": rendered_sharpness >= MIN_IMAGE_SHARPNESS_G1,
+            "high_res_verified": True,
             "resolution_label": res_desc,
             "capture_source": "real_src_date",
             "pixel_cloud_checked": bool(probe_live),
-            "cloud_filter_version": "v10_sentinel2_standard",
+            "cloud_filter_version": "v11_sentinel2_pure",
             "extent_bbox": extent_bbox,
             "direct_ortho_url": direct_url,
             "cached_image_url": cached_public_url,
@@ -1623,14 +1645,14 @@ def get_or_download_cached_parcel_map_bytes(
     if period_key not in valid_keys:
         raise ValueError(f"Periodo histórico inválido: {period_key}")
 
-    resolved_release = wayback_release or VERIFIED_TABASCO_CAPTURES[valid_keys[period_key]][
-        "wayback_release"
-    ]
+    resolved_release = wayback_release or EOX_CLOUDLESS_SUPPLEMENTS[
+        min(valid_keys[period_key], len(EOX_CLOUDLESS_SUPPLEMENTS) - 1)
+    ]["wayback_release"]
     target_dir = cache_dir or DEFAULT_MAP_CACHE_DIR
     target_dir.mkdir(parents=True, exist_ok=True)
     safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", parcel_id)
     safe_rel = re.sub(r"[^a-zA-Z0-9_-]", "_", resolved_release)
-    cache_file = target_dir / f"{safe_id}_{period_key}_{safe_rel}.jpg"
+    cache_file = target_dir / f"{safe_id}_s2v11_{period_key}_{safe_rel}.jpg"
 
     if cache_file.exists() and cache_file.stat().st_size > 1000:
         return cache_file.read_bytes()

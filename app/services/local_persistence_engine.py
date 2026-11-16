@@ -259,11 +259,12 @@ def supabase_row_to_parcel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
             item.get("capture_source") == "real_src_date"
             and bool(item.get("wayback_release"))
             and bool(item.get("pixel_cloud_checked"))
-            and item.get("cloud_filter_version") == "v10_sentinel2_standard"
+            and item.get("cloud_filter_version") == "v11_sentinel2_pure"
             and bool(item.get("cached_image_url"))
             for item in persisted_snapshots
         )
         and len({item.get("captured_date_iso") for item in persisted_snapshots}) == 7
+        and len({item.get("wayback_release") for item in persisted_snapshots}) == 7
     )
     if (
         has_real_distinct_dates
@@ -324,8 +325,7 @@ def _fetch_supabase_parcels(parcel_id: Optional[str] = None) -> List[Dict[str, A
         resp.raise_for_status()
         rows = resp.json()
 
-        results: List[Dict[str, Any]] = []
-        for raw_row in rows:
+        def _HydrateRow(raw_row: Dict[str, Any]) -> Dict[str, Any]:
             mapped = supabase_row_to_parcel_dict(raw_row)
             if not mapped.get("persisted_on_server"):
                 reg_iso = mapped.get("registered_at_iso")
@@ -344,16 +344,28 @@ def _fetch_supabase_parcels(parcel_id: Optional[str] = None) -> List[Dict[str, A
                 props["historical_snapshots"] = mapped["historical_snapshots"]
                 payload["properties"] = props
                 try:
-                    client.patch(
-                        f"{url}/rest/v1/parcels",
-                        params={"id": f"eq.{raw_row['id']}"},
-                        headers=_pg_headers(),
-                        json={"geojson_payload": payload},
-                    )
+                    with httpx.Client(timeout=15.0) as patch_client:
+                        patch_client.patch(
+                            f"{url}/rest/v1/parcels",
+                            params={"id": f"eq.{raw_row['id']}"},
+                            headers=_pg_headers(),
+                            json={"geojson_payload": payload},
+                        )
                     mapped["persisted_on_server"] = True
                 except httpx.HTTPError:
                     pass
-            results.append(mapped)
+            return mapped
+
+        stale_count = sum(
+            1 for r in rows if not supabase_row_to_parcel_dict(r).get("persisted_on_server")
+        )
+        if stale_count > 1:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=min(3, stale_count)) as executor:
+                results = list(executor.map(_HydrateRow, rows))
+        else:
+            results = [_HydrateRow(r) for r in rows]
     return results
 
 
