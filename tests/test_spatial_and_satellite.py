@@ -118,3 +118,43 @@ def test_sentinel2_live_endpoint_returns_ortho_and_stac_metadata() -> None:
     assert len(data["bbox"]) == 4
     assert data["latest_scene_id"]
     assert data["source_mode"] in {"live_stac", "fallback_cache"}
+
+
+def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) -> None:
+    from pathlib import Path
+    from app.services.satellite_audit_engine import (
+        build_historical_parcel_snapshots,
+        fit_bbox_to_aspect_ratio,
+        get_or_download_cached_parcel_map_bytes,
+    )
+
+    coords = [
+        [-93.2845, 18.2560],
+        [-93.2810, 18.2560],
+        [-93.2810, 18.2525],
+        [-93.2845, 18.2525],
+    ]
+    bundle = build_historical_parcel_snapshots("PAR-HIST-01", coords, "2026-11-15T12:00:00Z")
+    keys = [item["period_key"] for item in bundle["snapshots"]]
+    assert keys == [
+        "registro_actual",
+        "hace_6_meses",
+        "hace_1_anio",
+        "hace_2_anios",
+        "hace_3_anios",
+        "hace_4_anios",
+        "hace_5_anios",
+    ]
+    bbox = bundle["extent_bbox"]
+    assert round((bbox[2] - bbox[0]) / (bbox[3] - bbox[1]), 2) == 1.75
+    fitted = fit_bbox_to_aspect_ratio([-93.2275, 18.2085, -93.2185, 18.2175], 1.75)
+    assert round(fitted[0], 5) == -93.23088 or abs(fitted[0] - (-93.230875)) < 1e-4
+
+    cache_dir = Path(tmp_path) / "map_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cached_file = cache_dir / "PAR-HIST-01_hace_5_anios.jpg"
+    cached_file.write_bytes(b"JPEG_CACHED_BYTES_" * 12)
+    served = get_or_download_cached_parcel_map_bytes(
+        "PAR-HIST-01", "hace_5_anios", bbox, cache_dir=cache_dir
+    )
+    assert served.startswith(b"JPEG_CACHED_BYTES_")

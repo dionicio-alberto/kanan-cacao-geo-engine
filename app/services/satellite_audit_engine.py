@@ -1,7 +1,11 @@
 """Satellite audit engine for EUDR JRC 2020 (HU-03) and Sentinel-2 NDVI (HU-04)."""
 
+import calendar
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+import os
+from pathlib import Path
+import re
+from typing import Any, Dict, List, Optional
 import httpx
 from app.core.config import EUDR_CUTOFF_DATE_ISO, EUDR_LEGAL_DISCLAIMER
 from app.services.topology_engine import lint_and_validate_polygon
@@ -11,6 +15,22 @@ ESRI_WORLD_IMAGERY_EXPORT_URL = (
     "https://services.arcgisonline.com/ArcGIS/rest/services/"
     "World_Imagery/MapServer/export"
 )
+DEFAULT_MAP_CACHE_DIR = Path(
+    os.environ.get(
+        "KANAN_MAP_CACHE_DIR",
+        str(Path(__file__).resolve().parents[2] / "data" / "map_cache"),
+    )
+)
+
+HISTORICAL_PERIOD_SPECS = [
+    ("registro_actual", "Última foto al momento del registro", 0),
+    ("hace_6_meses", "Hace 6 meses", 6),
+    ("hace_1_anio", "Hace 1 año", 12),
+    ("hace_2_anios", "Hace 2 años", 24),
+    ("hace_3_anios", "Hace 3 años", 36),
+    ("hace_4_anios", "Hace 4 años", 48),
+    ("hace_5_anios", "Hace 5 años", 60),
+]
 
 
 def evaluate_eudr_2020_baseline(
@@ -190,3 +210,133 @@ def fetch_live_sentinel2_scene(
         "bbox": bbox,
         "area_hectares": topology["area_hectares"],
     }
+
+
+def fit_bbox_to_aspect_ratio(
+    bbox: List[float], target_aspect: float = 1.75
+) -> List[float]:
+    """Expand the shorter axis around center so the image aligns cleanly with SVG/canvas."""
+    min_lng, min_lat, max_lng, max_lat = [float(v) for v in bbox]
+    span_lng = max(max_lng - min_lng, 1e-6)
+    span_lat = max(max_lat - min_lat, 1e-6)
+    center_lng = (min_lng + max_lng) / 2.0
+    center_lat = (min_lat + max_lat) / 2.0
+    if (span_lng / span_lat) < target_aspect:
+        half_lng = (span_lat * target_aspect) / 2.0
+        return [
+            round(center_lng - half_lng, 6),
+            min_lat,
+            round(center_lng + half_lng, 6),
+            max_lat,
+        ]
+    half_lat = (span_lng / target_aspect) / 2.0
+    return [
+        min_lng,
+        round(center_lat - half_lat, 6),
+        max_lng,
+        round(center_lat + half_lat, 6),
+    ]
+
+
+def _subtract_months(anchor: datetime, months: int) -> datetime:
+    total_months = (anchor.year * 12 + (anchor.month - 1)) - months
+    year = total_months // 12
+    month = (total_months % 12) + 1
+    max_day = calendar.monthrange(year, month)[1]
+    day = min(anchor.day, max_day)
+    return anchor.replace(year=year, month=month, day=day)
+
+
+def _build_ortho_export_url(extent_bbox: List[float], epoch_ms: Optional[int] = None) -> str:
+    bbox_str = ",".join(str(v) for v in extent_bbox)
+    base_url = (
+        f"{ESRI_WORLD_IMAGERY_EXPORT_URL}?bbox={bbox_str}"
+        "&bboxSR=4326&imageSR=4326&size=840,480&format=jpg&f=image"
+    )
+    if epoch_ms is not None:
+        return f"{base_url}&time={epoch_ms}"
+    return base_url
+
+
+def build_historical_parcel_snapshots(
+    parcel_id: str,
+    raw_coordinates: List[List[float]],
+    registered_at_iso: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Build the 7-point historical satellite manifest (current, 6m, 1y, 2y, 3y, 4y, 5y)
+    centered on the parcel polygon so it can be persisted once on the server.
+    """
+    topology = lint_and_validate_polygon(raw_coordinates)
+    ring = topology["polygon"]["coordinates"][0]
+    raw_bbox = build_bbox_and_ortho_url(ring)["bbox"]
+    extent_bbox = fit_bbox_to_aspect_ratio(raw_bbox, target_aspect=1.75)
+
+    if registered_at_iso:
+        try:
+            anchor = datetime.fromisoformat(registered_at_iso.replace("Z", "+00:00"))
+        except ValueError:
+            anchor = datetime.now(timezone.utc)
+    else:
+        anchor = datetime.now(timezone.utc)
+
+    snapshots: List[Dict[str, Any]] = []
+    for period_key, label, months_ago in HISTORICAL_PERIOD_SPECS:
+        snap_dt = _subtract_months(anchor, months_ago) if months_ago > 0 else anchor
+        epoch_ms = int(snap_dt.timestamp() * 1000) if months_ago > 0 else None
+        snapshots.append(
+            {
+                "period_key": period_key,
+                "label": label,
+                "months_ago": months_ago,
+                "captured_date_iso": snap_dt.date().isoformat(),
+                "extent_bbox": extent_bbox,
+                "direct_ortho_url": _build_ortho_export_url(extent_bbox, epoch_ms),
+                "server_cached_image_path": (
+                    f"/api/v1/parcels/{parcel_id}/historical-image/{period_key}"
+                ),
+            }
+        )
+
+    return {
+        "parcel_id": parcel_id,
+        "area_hectares": topology["area_hectares"],
+        "coordinates": ring,
+        "extent_bbox": extent_bbox,
+        "snapshots": snapshots,
+    }
+
+
+def get_or_download_cached_parcel_map_bytes(
+    parcel_id: str,
+    period_key: str,
+    extent_bbox: List[float],
+    months_ago: int = 0,
+    cache_dir: Optional[Path] = None,
+) -> bytes:
+    """Return cached JPEG bytes from server disk or download once and persist."""
+    valid_keys = {spec[0]: spec[2] for spec in HISTORICAL_PERIOD_SPECS}
+    if period_key not in valid_keys:
+        raise ValueError(f"Periodo histórico inválido: {period_key}")
+
+    target_dir = cache_dir or DEFAULT_MAP_CACHE_DIR
+    target_dir.mkdir(parents=True, exist_ok=True)
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", parcel_id)
+    cache_file = target_dir / f"{safe_id}_{period_key}.jpg"
+
+    if cache_file.exists() and cache_file.stat().st_size > 100:
+        return cache_file.read_bytes()
+
+    effective_months = valid_keys[period_key] if months_ago == 0 else months_ago
+    anchor = datetime.now(timezone.utc)
+    snap_dt = _subtract_months(anchor, effective_months) if effective_months > 0 else anchor
+    epoch_ms = int(snap_dt.timestamp() * 1000) if effective_months > 0 else None
+    ortho_url = _build_ortho_export_url(extent_bbox, epoch_ms)
+
+    with httpx.Client(timeout=12.0, follow_redirects=True) as client:
+        resp = client.get(ortho_url)
+        resp.raise_for_status()
+        img_bytes = resp.content
+
+    cache_file.write_bytes(img_bytes)
+    return img_bytes
