@@ -43,11 +43,12 @@ DEFAULT_MAP_CACHE_DIR = Path(
     )
 )
 MAX_CLOUD_COVER_PCT = 25.0
-MAX_PURE_WHITE_CLOUD_PCT = 6.0
+MAX_PURE_WHITE_CLOUD_PCT = 4.0
+MAX_SHADOW_CLOUD_PCT = 8.0
 MAX_AVG_HAZE_PCT = 14.0
-MAX_TILE_HAZE_PCT = 22.0
+MAX_TILE_HAZE_PCT = 18.0
 MAX_NODATA_OR_BLACK_PCT = 12.0
-MAX_CLOUD_RETRY_ATTEMPTS = 10
+MAX_CLOUD_RETRY_ATTEMPTS = 20
 RECENT_PHOTO_WINDOW_CANDIDATES = 5
 WAYBACK_EXACT_WINDOW_DAYS = 21
 MIN_IMAGE_SHARPNESS_G1 = 5.5
@@ -468,26 +469,40 @@ def resolve_wmts_tile_url(release: str, zoom: int, row: int, col: int) -> str:
 
 
 def compute_tile_cloud_metrics(tile_bytes: bytes) -> Dict[str, float]:
-    """Inspect decoded RGBA pixels for white clouds, haze, transparent nodata, and black edges."""
+    """Inspect decoded RGBA pixels for white clouds, shadows, haze, nodata, and black edges."""
     if len(tile_bytes) < 500:
-        return {"white_pct": 100.0, "haze_pct": 100.0, "nodata_pct": 100.0, "black_pct": 100.0}
+        return {
+            "white_pct": 100.0,
+            "shadow_pct": 100.0,
+            "haze_pct": 100.0,
+            "nodata_pct": 100.0,
+            "black_pct": 100.0,
+        }
     try:
         im = Image.open(io.BytesIO(tile_bytes)).convert("RGBA")
         arr = np.asarray(im, dtype=np.int16)
     except Exception:
-        return {"white_pct": 0.0, "haze_pct": 0.0, "nodata_pct": 0.0, "black_pct": 0.0}
+        return {
+            "white_pct": 0.0,
+            "shadow_pct": 0.0,
+            "haze_pct": 0.0,
+            "nodata_pct": 0.0,
+            "black_pct": 0.0,
+        }
 
     rgb = arr[:, :, :3]
     nodata_pct = float((arr[:, :, 3] == 0).mean() * 100.0)
     black_pct = float((rgb.max(axis=2) < 5).mean() * 100.0)
     brightness = rgb.mean(axis=2)
     chroma = rgb.max(axis=2) - rgb.min(axis=2)
-    white_pct = float(((brightness > 212) & (chroma < 25)).mean() * 100.0)
+    white_pct = float(((brightness > 180) & (chroma < 38)).mean() * 100.0)
+    shadow_pct = float((brightness < 26).mean() * 100.0)
     haze_pct = float(
         ((rgb[:, :, 2] >= rgb[:, :, 1] - 2) & (brightness > 95)).mean() * 100.0
     )
     return {
         "white_pct": round(white_pct, 2),
+        "shadow_pct": round(shadow_pct, 2),
         "haze_pct": round(haze_pct, 2),
         "nodata_pct": round(nodata_pct, 2),
         "black_pct": round(black_pct, 2),
@@ -585,12 +600,24 @@ def _fetch_viewport_tile_grid(
 
 
 def _compute_parcel_center_cloud_metrics(im: Image.Image) -> Dict[str, float]:
-    """Compute cloud/haze/nodata metrics weighted over the central parcel area."""
+    """Compute cloud, shadow & nodata metrics taking worst across full vs parcel center."""
+    full_buf = io.BytesIO()
+    im.save(full_buf, format="PNG")
+    full_m = compute_tile_cloud_metrics(full_buf.getvalue())
+
     w, h = im.size
     crop = im.crop((int(w * 0.2), int(h * 0.2), int(w * 0.8), int(h * 0.8)))
-    buf = io.BytesIO()
-    crop.save(buf, format="PNG")
-    return compute_tile_cloud_metrics(buf.getvalue())
+    crop_buf = io.BytesIO()
+    crop.save(crop_buf, format="PNG")
+    cen_m = compute_tile_cloud_metrics(crop_buf.getvalue())
+
+    return {
+        "white_pct": round(max(full_m["white_pct"], cen_m["white_pct"]), 2),
+        "shadow_pct": round(max(full_m.get("shadow_pct", 0.0), cen_m.get("shadow_pct", 0.0)), 2),
+        "haze_pct": round(max(full_m["haze_pct"], cen_m["haze_pct"]), 2),
+        "nodata_pct": round(max(full_m["nodata_pct"], cen_m["nodata_pct"]), 2),
+        "black_pct": round(max(full_m["black_pct"], cen_m["black_pct"]), 2),
+    }
 
 
 def _render_mpc_sentinel2_bicubic(
@@ -601,12 +628,12 @@ def _render_mpc_sentinel2_bicubic(
 ) -> Tuple[bytes, Dict[str, float], int]:
     """
     Fetch native Sentinel-2 zoom=14 visual tiles and crop via bicubic + UnsharpMask
-    at zoom <= 15 so plots show crisp context roads/groves without over-zoom blocks.
+    at zoom <= 16 so compact parcels sit clearly centered without tiny over-zoomed loss.
     """
     center_lat, center_lng, base_zoom = compute_centered_wayback_viewport(
         coordinates, view_w=view_w, view_h=view_h
     )
-    render_zoom = min(15, base_zoom)
+    render_zoom = min(16, base_zoom)
     native_zoom = 14
     scale_div = float(2 ** (render_zoom - native_zoom))
     cx_nat, cy_nat = _lat_lng_to_world_px(center_lat, center_lng, native_zoom)
@@ -976,12 +1003,14 @@ def select_best_candidate_within_10_attempts(
         nodata_pct = float(metrics.get("nodata_pct", 0.0))
         black_pct = float(metrics.get("black_pct", 0.0))
         white_pct = float(metrics.get("white_pct", 0.0))
+        shadow_pct = float(metrics.get("shadow_pct", 0.0))
         haze_pct = float(metrics.get("haze_pct", 0.0))
         if nodata_pct >= 25.0 or black_pct >= 25.0:
             continue
 
         is_clear = (
             white_pct <= MAX_PURE_WHITE_CLOUD_PCT
+            and shadow_pct <= MAX_SHADOW_CLOUD_PCT
             and haze_pct <= MAX_TILE_HAZE_PCT
             and nodata_pct < MAX_NODATA_OR_BLACK_PCT
             and black_pct < MAX_NODATA_OR_BLACK_PCT
@@ -989,7 +1018,9 @@ def select_best_candidate_within_10_attempts(
         enriched = dict(cand)
         enriched["_pre_rendered_jpeg"] = jpeg_bytes
         enriched["_render_zoom"] = render_zoom
-        enriched["cloud_cover_pct"] = round(min(100.0, white_pct + haze_pct * 0.35), 2)
+        enriched["cloud_cover_pct"] = round(
+            min(100.0, white_pct + shadow_pct * 0.5 + haze_pct * 0.35), 2
+        )
         enriched["cloud_attempts_used"] = idx
         enriched["sharpness_g1"] = compute_image_sharpness(jpeg_bytes)
 
@@ -997,7 +1028,12 @@ def select_best_candidate_within_10_attempts(
             enriched["cloud_fallback_least_cloudy"] = False
             return enriched
 
-        cloud_score = (white_pct * 2.5) + (haze_pct * 0.9) + (nodata_pct * 4.0)
+        cloud_score = (
+            (white_pct * 2.5)
+            + (shadow_pct * 1.4)
+            + (haze_pct * 0.9)
+            + (nodata_pct * 4.0)
+        )
         if recent_priority_count > 0 and idx > recent_priority_count:
             cloud_score += 2.0
         if best_fallback is None or cloud_score < best_fallback[0]:
@@ -1020,13 +1056,13 @@ def _search_mpc_sentinel2_for_horizon(
 ) -> Optional[Dict[str, Any]]:
     """
     Query Sentinel-2 L2A scenes closest to `target_date` stepping backwards in days.
-    Inspect up to MAX_CLOUD_RETRY_ATTEMPTS (10) attempts and choose either the first
-    cloud-free image or the least-cloudy image among those 10 attempts.
+    Inspect up to MAX_CLOUD_RETRY_ATTEMPTS (20) attempts and choose either the first
+    cloud-free image or the least-cloudy image among those 20 attempts.
     """
     end_dt = min(max_date, target_date)
-    start_dt = max(date(2017, 1, 1), end_dt - timedelta(days=90))
+    start_dt = max(date(2017, 1, 1), end_dt - timedelta(days=150))
     if end_dt < start_dt:
-        start_dt = max(date(2017, 1, 1), end_dt - timedelta(days=90))
+        start_dt = max(date(2017, 1, 1), end_dt - timedelta(days=150))
 
     bbox = [
         round(lng - 0.004, 6),
@@ -1035,7 +1071,7 @@ def _search_mpc_sentinel2_for_horizon(
         round(lat + 0.0025, 6),
     ]
     try:
-        with httpx.Client(timeout=10.0) as client:
+        with httpx.Client(timeout=12.0) as client:
             res = client.post(
                 PLANETARY_COMPUTER_STAC_URL,
                 json={
@@ -1043,7 +1079,7 @@ def _search_mpc_sentinel2_for_horizon(
                     "bbox": bbox,
                     "datetime": f"{start_dt.isoformat()}T00:00:00Z/{end_dt.isoformat()}T23:59:59Z",
                     "query": {"eo:cloud_cover": {"lt": 92}},
-                    "limit": 40,
+                    "limit": 80,
                 },
             )
             res.raise_for_status()
@@ -1275,7 +1311,7 @@ def build_historical_parcel_snapshots(
         formatted_date = format_date_ddmmyyyy(real_date)
         final_label = label if formatted_date in label else f"{label} ({formatted_date})"
         actual_zoom = int(
-            cap.get("_render_zoom") or (min(15, vp_zoom) if rel.startswith("mpc:") else vp_zoom)
+            cap.get("_render_zoom") or (min(16, vp_zoom) if rel.startswith("mpc:") else vp_zoom)
         )
         direct_url = resolve_wmts_tile_url(rel, actual_zoom, row, col)
         cached_public_url: Optional[str] = None
@@ -1314,12 +1350,12 @@ def build_historical_parcel_snapshots(
             "cloud_fallback_least_cloudy": bool(cap.get("cloud_fallback_least_cloudy")),
             "sharpness_g1": rendered_sharpness,
             "high_res_verified": rendered_sharpness >= (
-                3.5 if rel.startswith("mpc:") else MIN_IMAGE_SHARPNESS_G1
+                2.5 if rel.startswith("mpc:") else MIN_IMAGE_SHARPNESS_G1
             ),
             "resolution_label": res_desc,
             "capture_source": "real_src_date",
             "pixel_cloud_checked": bool(probe_live),
-            "cloud_filter_version": "v5_days_margin",
+            "cloud_filter_version": "v6_centered_20attempts",
             "extent_bbox": extent_bbox,
             "direct_ortho_url": direct_url,
             "cached_image_url": cached_public_url,
