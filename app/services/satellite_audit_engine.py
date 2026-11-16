@@ -362,14 +362,20 @@ def _lat_lng_to_tile_row_col(
     return row, col
 
 
-def compute_centered_wayback_viewport(
+def compute_optimal_parcel_zoom(
     coordinates: List[List[float]],
     view_w: int = VIEWPORT_W,
     view_h: int = VIEWPORT_H,
-) -> Tuple[float, float, int]:
-    """Match frontend Web Mercator zoom/center algorithm bit-for-bit."""
+    fill_ratio: float = 0.58,
+    min_zoom: float = 12.5,
+    max_zoom: float = 18.2,
+) -> Tuple[float, float, float]:
+    """
+    Compute exact continuous Web Mercator zoom and center so the entire parcel fits
+    centered inside `fill_ratio` of the viewport regardless of parcel hectare size.
+    """
     if not coordinates:
-        return 18.2545, -93.2825, 16
+        return 18.2545, -93.2825, 16.0
     lngs = [float(pt[0]) for pt in coordinates]
     lats = [float(pt[1]) for pt in coordinates]
     min_lng, max_lng = min(lngs), max(lngs)
@@ -377,12 +383,24 @@ def compute_centered_wayback_viewport(
     center_lng = (min_lng + max_lng) / 2.0
     center_lat = (min_lat + max_lat) / 2.0
 
-    for z in range(17, 13, -1):
-        tl_x, tl_y = _lat_lng_to_world_px(max_lat, min_lng, z)
-        br_x, br_y = _lat_lng_to_world_px(min_lat, max_lng, z)
-        if abs(br_x - tl_x) <= view_w * 0.52 and abs(br_y - tl_y) <= view_h * 0.52:
-            return center_lat, center_lng, z
-    return center_lat, center_lng, 14
+    tl_x0, tl_y0 = _lat_lng_to_world_px(max_lat, min_lng, 0)
+    br_x0, br_y0 = _lat_lng_to_world_px(min_lat, max_lng, 0)
+    span_x0 = max(abs(br_x0 - tl_x0), 1e-7)
+    span_y0 = max(abs(br_y0 - tl_y0), 1e-7)
+
+    zoom_x = math.log2((view_w * fill_ratio) / span_x0)
+    zoom_y = math.log2((view_h * fill_ratio) / span_y0)
+    optimal_zoom = max(min_zoom, min(max_zoom, round(min(zoom_x, zoom_y), 2)))
+    return center_lat, center_lng, optimal_zoom
+
+
+def compute_centered_wayback_viewport(
+    coordinates: List[List[float]],
+    view_w: int = VIEWPORT_W,
+    view_h: int = VIEWPORT_H,
+) -> Tuple[float, float, float]:
+    """Match frontend Web Mercator dynamic zoom/center algorithm bit-for-bit."""
+    return compute_optimal_parcel_zoom(coordinates, view_w=view_w, view_h=view_h)
 
 
 def compute_image_sharpness(img_bytes: bytes) -> float:
@@ -550,9 +568,10 @@ def _fetch_viewport_tile_grid(
     view_w: int = VIEWPORT_W,
     view_h: int = VIEWPORT_H,
 ) -> Tuple[float, float, int, int, int, int, int, Dict[Tuple[int, int], bytes]]:
-    center_lat, center_lng, zoom = compute_centered_wayback_viewport(
+    center_lat, center_lng, opt_zoom = compute_centered_wayback_viewport(
         coordinates, view_w=view_w, view_h=view_h
     )
+    zoom = max(13, min(17, int(round(opt_zoom))))
     center_wx, center_wy = _lat_lng_to_world_px(center_lat, center_lng, zoom)
     top_left_x = center_wx - view_w / 2.0
     top_left_y = center_wy - view_h / 2.0
@@ -620,28 +639,29 @@ def _compute_parcel_center_cloud_metrics(im: Image.Image) -> Dict[str, float]:
     }
 
 
-def _render_mpc_sentinel2_bicubic(
+def _render_wmts_fractional_zoom(
     coordinates: List[List[float]],
     release: str,
+    render_zoom: float,
+    fetch_zoom: int,
     view_w: int = VIEWPORT_W,
     view_h: int = VIEWPORT_H,
-) -> Tuple[bytes, Dict[str, float], int]:
+    sharpen: bool = False,
+) -> Tuple[bytes, Dict[str, float], float]:
     """
-    Fetch native Sentinel-2 zoom=14 visual tiles and crop via bicubic + UnsharpMask
-    at zoom <= 16 so compact parcels sit clearly centered without tiny over-zoomed loss.
+    Fetch WMTS tiles at integer `fetch_zoom` and smoothly crop/scale via bicubic transform
+    to exact continuous `render_zoom` centered on the parcel polygon.
     """
-    center_lat, center_lng, base_zoom = compute_centered_wayback_viewport(
+    center_lat, center_lng, _ = compute_optimal_parcel_zoom(
         coordinates, view_w=view_w, view_h=view_h
     )
-    render_zoom = min(16, base_zoom)
-    native_zoom = 14
-    scale_div = float(2 ** (render_zoom - native_zoom))
-    cx_nat, cy_nat = _lat_lng_to_world_px(center_lat, center_lng, native_zoom)
+    scale_div = float(2.0 ** (render_zoom - fetch_zoom))
+    cx_nat, cy_nat = _lat_lng_to_world_px(center_lat, center_lng, fetch_zoom)
     half_w = (view_w / 2.0) / scale_div
     half_h = (view_h / 2.0) / scale_div
     x0, y0, x1, y1 = cx_nat - half_w, cy_nat - half_h, cx_nat + half_w, cy_nat + half_h
 
-    max_tile = (2 ** native_zoom) - 1
+    max_tile = (2 ** fetch_zoom) - 1
     min_tx = max(0, int(math.floor(x0 / TILE_SIZE)))
     max_tx = min(max_tile, int(math.floor(x1 / TILE_SIZE)))
     min_ty = max(0, int(math.floor(y0 / TILE_SIZE)))
@@ -653,9 +673,9 @@ def _render_mpc_sentinel2_bicubic(
         for ty in range(min_ty, max_ty + 1)
     ]
 
-    def _get_mpc_tile(tx_ty: Tuple[int, int]) -> Tuple[Tuple[int, int], Optional[bytes]]:
+    def _get_tile(tx_ty: Tuple[int, int]) -> Tuple[Tuple[int, int], Optional[bytes]]:
         tx, ty = tx_ty
-        tile_url = resolve_wmts_tile_url(release, native_zoom, ty, tx)
+        tile_url = resolve_wmts_tile_url(release, fetch_zoom, ty, tx)
         try:
             with httpx.Client(timeout=12.0, follow_redirects=True) as client:
                 res = client.get(tile_url, headers={"User-Agent": "KananCacaoGeoEngine/1.0"})
@@ -666,13 +686,13 @@ def _render_mpc_sentinel2_bicubic(
         return (tx, ty), None
 
     tile_map: Dict[Tuple[int, int], bytes] = {}
-    with ThreadPoolExecutor(max_workers=6) as executor:
-        for (tx, ty), raw_bytes in executor.map(_get_mpc_tile, coords_to_fetch):
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        for (tx, ty), raw_bytes in executor.map(_get_tile, coords_to_fetch):
             if raw_bytes:
                 tile_map[(tx, ty)] = raw_bytes
 
     if not tile_map:
-        raise RuntimeError(f"No se pudieron descargar teselas Sentinel-2 para {release}.")
+        raise RuntimeError(f"No se pudieron descargar teselas WMTS para {release}.")
 
     stitched = Image.new(
         "RGB",
@@ -702,8 +722,9 @@ def _render_mpc_sentinel2_bicubic(
         crop_box,
         Image.Resampling.BICUBIC,
     )
-    rendered = rendered.filter(ImageFilter.UnsharpMask(radius=1.4, percent=130, threshold=2))
-    rendered = ImageEnhance.Contrast(rendered).enhance(1.12)
+    if sharpen:
+        rendered = rendered.filter(ImageFilter.UnsharpMask(radius=1.4, percent=130, threshold=2))
+        rendered = ImageEnhance.Contrast(rendered).enhance(1.12)
 
     out = io.BytesIO()
     rendered.save(out, format="JPEG", quality=90, optimize=True)
@@ -712,51 +733,54 @@ def _render_mpc_sentinel2_bicubic(
     return jpeg_bytes, metrics, render_zoom
 
 
+def _render_mpc_sentinel2_bicubic(
+    coordinates: List[List[float]],
+    release: str,
+    view_w: int = VIEWPORT_W,
+    view_h: int = VIEWPORT_H,
+) -> Tuple[bytes, Dict[str, float], float]:
+    """Render Sentinel-2 L2A from native zoom=14 cleanly scaled to centered parcel zoom."""
+    _, _, optimal_zoom = compute_optimal_parcel_zoom(
+        coordinates, view_w=view_w, view_h=view_h
+    )
+    render_zoom = round(min(16.75, optimal_zoom), 2)
+    return _render_wmts_fractional_zoom(
+        coordinates,
+        release,
+        render_zoom=render_zoom,
+        fetch_zoom=14,
+        view_w=view_w,
+        view_h=view_h,
+        sharpen=True,
+    )
+
+
 def render_centered_parcel_map_jpeg(
     coordinates: List[List[float]],
     release: str,
     view_w: int = VIEWPORT_W,
     view_h: int = VIEWPORT_H,
 ) -> Tuple[bytes, Dict[str, float]]:
-    """Download WMTS tiles for the parcel viewport, check clouds, and stitch a 760x420 JPEG."""
+    """Download WMTS tiles at dynamic optimal parcel zoom, check clouds, and stitch JPEG."""
     if release.startswith("mpc:"):
         jpeg_bytes, metrics, _ = _render_mpc_sentinel2_bicubic(
             coordinates, release, view_w=view_w, view_h=view_h
         )
         return jpeg_bytes, metrics
 
-    (
-        top_left_x,
-        top_left_y,
-        min_tx,
-        max_tx,
-        min_ty,
-        max_ty,
-        _zoom,
-        tile_map,
-    ) = _fetch_viewport_tile_grid(coordinates, release, view_w=view_w, view_h=view_h)
-
-    if not tile_map:
-        raise RuntimeError(f"No se pudieron descargar teselas WMTS para release {release}.")
-
-    canvas = Image.new("RGB", (view_w, view_h), (17, 36, 24))
-    for tx in range(min_tx, max_tx + 1):
-        for ty in range(min_ty, max_ty + 1):
-            raw = tile_map.get((tx, ty))
-            if not raw:
-                continue
-            try:
-                tile_im = Image.open(io.BytesIO(raw)).convert("RGB")
-                paste_x = round(tx * TILE_SIZE - top_left_x)
-                paste_y = round(ty * TILE_SIZE - top_left_y)
-                canvas.paste(tile_im, (paste_x, paste_y))
-            except Exception:
-                continue
-
-    out = io.BytesIO()
-    canvas.save(out, format="JPEG", quality=86, optimize=True)
-    jpeg_bytes = out.getvalue()
-    metrics = _compute_parcel_center_cloud_metrics(canvas)
+    _, _, optimal_zoom = compute_optimal_parcel_zoom(
+        coordinates, view_w=view_w, view_h=view_h
+    )
+    fetch_zoom = min(17, max(13, int(math.ceil(optimal_zoom))))
+    jpeg_bytes, metrics, _ = _render_wmts_fractional_zoom(
+        coordinates,
+        release,
+        render_zoom=optimal_zoom,
+        fetch_zoom=fetch_zoom,
+        view_w=view_w,
+        view_h=view_h,
+        sharpen=False,
+    )
     return jpeg_bytes, metrics
 
 
@@ -1284,7 +1308,9 @@ def build_historical_parcel_snapshots(
     center_lng = sum(float(pt[0]) for pt in ring) / len(ring)
     center_lat = sum(float(pt[1]) for pt in ring) / len(ring)
     _, _, vp_zoom = compute_centered_wayback_viewport(ring)
-    row, col = _lat_lng_to_tile_row_col(center_lat, center_lng, zoom=vp_zoom)
+    row, col = _lat_lng_to_tile_row_col(
+        center_lat, center_lng, zoom=max(13, min(17, int(round(vp_zoom))))
+    )
 
     anchor = _parse_anchor_datetime(reference_date_iso or registered_at_iso)
 
@@ -1310,10 +1336,16 @@ def build_historical_parcel_snapshots(
         real_date = cap["capture_date"]
         formatted_date = format_date_ddmmyyyy(real_date)
         final_label = label if formatted_date in label else f"{label} ({formatted_date})"
-        actual_zoom = int(
-            cap.get("_render_zoom") or (min(16, vp_zoom) if rel.startswith("mpc:") else vp_zoom)
+        actual_zoom = float(
+            round(
+                cap.get("_render_zoom")
+                or (min(16.75, vp_zoom) if rel.startswith("mpc:") else vp_zoom),
+                2,
+            )
         )
-        direct_url = resolve_wmts_tile_url(rel, actual_zoom, row, col)
+        direct_url = resolve_wmts_tile_url(
+            rel, max(13, min(17, int(round(actual_zoom)))), row, col
+        )
         cached_public_url: Optional[str] = None
         rendered_sharpness = float(cap.get("sharpness_g1") or 8.0)
 
@@ -1350,12 +1382,12 @@ def build_historical_parcel_snapshots(
             "cloud_fallback_least_cloudy": bool(cap.get("cloud_fallback_least_cloudy")),
             "sharpness_g1": rendered_sharpness,
             "high_res_verified": rendered_sharpness >= (
-                2.5 if rel.startswith("mpc:") else MIN_IMAGE_SHARPNESS_G1
+                2.2 if rel.startswith("mpc:") else MIN_IMAGE_SHARPNESS_G1
             ),
             "resolution_label": res_desc,
             "capture_source": "real_src_date",
             "pixel_cloud_checked": bool(probe_live),
-            "cloud_filter_version": "v6_centered_20attempts",
+            "cloud_filter_version": "v7_optimal_zoom",
             "extent_bbox": extent_bbox,
             "direct_ortho_url": direct_url,
             "cached_image_url": cached_public_url,
