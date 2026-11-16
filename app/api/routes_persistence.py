@@ -2,9 +2,12 @@
 
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from app.services.local_persistence_engine import (
     get_active_storage_engine,
+    get_cached_parcel_map_image,
+    get_or_create_parcel_historical_snapshots,
     list_persisted_parcels,
     record_persisted_reception,
     sync_offline_parcels,
@@ -73,3 +76,24 @@ def persisted_reception_endpoint(payload: PersistedReceptionRequest) -> Dict[str
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/parcels/{parcel_id}/historical-snapshots")
+def get_historical_snapshots_endpoint(parcel_id: str) -> Dict[str, Any]:
+    try:
+        return get_or_create_parcel_historical_snapshots(parcel_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/parcels/{parcel_id}/historical-image/{period_key}")
+def get_historical_image_endpoint(parcel_id: str, period_key: str) -> Response:
+    try:
+        img_bytes = get_cached_parcel_map_image(parcel_id, period_key)
+        return Response(
+            content=img_bytes,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

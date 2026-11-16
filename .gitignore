@@ -28,6 +28,7 @@ AGENTS.md
 CLAUDE.md
 skills-lock.json
 
-# Local SQLite database
+# Local SQLite database and map cache
 data/*.db
 data/*.db-*
+data/map_cache/
