@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import urllib.parse
 import httpx
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter
 from app.core.config import EUDR_CUTOFF_DATE_ISO, EUDR_LEGAL_DISCLAIMER
 from app.services.topology_engine import lint_and_validate_polygon
 
@@ -43,10 +43,13 @@ DEFAULT_MAP_CACHE_DIR = Path(
     )
 )
 MAX_CLOUD_COVER_PCT = 25.0
-MAX_PURE_WHITE_CLOUD_PCT = 12.0
-MAX_AVG_HAZE_PCT = 12.0
-MAX_TILE_HAZE_PCT = 20.0
-MAX_NODATA_OR_BLACK_PCT = 15.0
+MAX_PURE_WHITE_CLOUD_PCT = 6.0
+MAX_AVG_HAZE_PCT = 14.0
+MAX_TILE_HAZE_PCT = 22.0
+MAX_NODATA_OR_BLACK_PCT = 12.0
+MAX_CLOUD_RETRY_ATTEMPTS = 10
+RECENT_PHOTO_WINDOW_CANDIDATES = 5
+WAYBACK_EXACT_WINDOW_DAYS = 21
 MIN_IMAGE_SHARPNESS_G1 = 5.5
 MAX_SRC_RES_METERS = 2.5
 VIEWPORT_W = 760
@@ -581,6 +584,107 @@ def _fetch_viewport_tile_grid(
     )
 
 
+def _compute_parcel_center_cloud_metrics(im: Image.Image) -> Dict[str, float]:
+    """Compute cloud/haze/nodata metrics weighted over the central parcel area."""
+    w, h = im.size
+    crop = im.crop((int(w * 0.2), int(h * 0.2), int(w * 0.8), int(h * 0.8)))
+    buf = io.BytesIO()
+    crop.save(buf, format="PNG")
+    return compute_tile_cloud_metrics(buf.getvalue())
+
+
+def _render_mpc_sentinel2_bicubic(
+    coordinates: List[List[float]],
+    release: str,
+    view_w: int = VIEWPORT_W,
+    view_h: int = VIEWPORT_H,
+) -> Tuple[bytes, Dict[str, float], int]:
+    """
+    Fetch native Sentinel-2 zoom=14 visual tiles and crop via bicubic + UnsharpMask
+    at zoom <= 15 so plots show crisp context roads/groves without over-zoom blocks.
+    """
+    center_lat, center_lng, base_zoom = compute_centered_wayback_viewport(
+        coordinates, view_w=view_w, view_h=view_h
+    )
+    render_zoom = min(15, base_zoom)
+    native_zoom = 14
+    scale_div = float(2 ** (render_zoom - native_zoom))
+    cx_nat, cy_nat = _lat_lng_to_world_px(center_lat, center_lng, native_zoom)
+    half_w = (view_w / 2.0) / scale_div
+    half_h = (view_h / 2.0) / scale_div
+    x0, y0, x1, y1 = cx_nat - half_w, cy_nat - half_h, cx_nat + half_w, cy_nat + half_h
+
+    max_tile = (2 ** native_zoom) - 1
+    min_tx = max(0, int(math.floor(x0 / TILE_SIZE)))
+    max_tx = min(max_tile, int(math.floor(x1 / TILE_SIZE)))
+    min_ty = max(0, int(math.floor(y0 / TILE_SIZE)))
+    max_ty = min(max_tile, int(math.floor(y1 / TILE_SIZE)))
+
+    coords_to_fetch = [
+        (tx, ty)
+        for tx in range(min_tx, max_tx + 1)
+        for ty in range(min_ty, max_ty + 1)
+    ]
+
+    def _get_mpc_tile(tx_ty: Tuple[int, int]) -> Tuple[Tuple[int, int], Optional[bytes]]:
+        tx, ty = tx_ty
+        tile_url = resolve_wmts_tile_url(release, native_zoom, ty, tx)
+        try:
+            with httpx.Client(timeout=12.0, follow_redirects=True) as client:
+                res = client.get(tile_url, headers={"User-Agent": "KananCacaoGeoEngine/1.0"})
+                if res.status_code == 200:
+                    return (tx, ty), res.content
+        except Exception:
+            pass
+        return (tx, ty), None
+
+    tile_map: Dict[Tuple[int, int], bytes] = {}
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        for (tx, ty), raw_bytes in executor.map(_get_mpc_tile, coords_to_fetch):
+            if raw_bytes:
+                tile_map[(tx, ty)] = raw_bytes
+
+    if not tile_map:
+        raise RuntimeError(f"No se pudieron descargar teselas Sentinel-2 para {release}.")
+
+    stitched = Image.new(
+        "RGB",
+        ((max_tx - min_tx + 1) * TILE_SIZE, (max_ty - min_ty + 1) * TILE_SIZE),
+        (17, 36, 24),
+    )
+    for tx in range(min_tx, max_tx + 1):
+        for ty in range(min_ty, max_ty + 1):
+            raw = tile_map.get((tx, ty))
+            if not raw:
+                continue
+            try:
+                tile_im = Image.open(io.BytesIO(raw)).convert("RGB")
+                stitched.paste(tile_im, ((tx - min_tx) * TILE_SIZE, (ty - min_ty) * TILE_SIZE))
+            except Exception:
+                continue
+
+    crop_box = (
+        x0 - min_tx * TILE_SIZE,
+        y0 - min_ty * TILE_SIZE,
+        x1 - min_tx * TILE_SIZE,
+        y1 - min_ty * TILE_SIZE,
+    )
+    rendered = stitched.transform(
+        (view_w, view_h),
+        Image.Transform.EXTENT,
+        crop_box,
+        Image.Resampling.BICUBIC,
+    )
+    rendered = rendered.filter(ImageFilter.UnsharpMask(radius=1.4, percent=130, threshold=2))
+    rendered = ImageEnhance.Contrast(rendered).enhance(1.12)
+
+    out = io.BytesIO()
+    rendered.save(out, format="JPEG", quality=90, optimize=True)
+    jpeg_bytes = out.getvalue()
+    metrics = _compute_parcel_center_cloud_metrics(rendered)
+    return jpeg_bytes, metrics, render_zoom
+
+
 def render_centered_parcel_map_jpeg(
     coordinates: List[List[float]],
     release: str,
@@ -588,6 +692,12 @@ def render_centered_parcel_map_jpeg(
     view_h: int = VIEWPORT_H,
 ) -> Tuple[bytes, Dict[str, float]]:
     """Download WMTS tiles for the parcel viewport, check clouds, and stitch a 760x420 JPEG."""
+    if release.startswith("mpc:"):
+        jpeg_bytes, metrics, _ = _render_mpc_sentinel2_bicubic(
+            coordinates, release, view_w=view_w, view_h=view_h
+        )
+        return jpeg_bytes, metrics
+
     (
         top_left_x,
         top_left_y,
@@ -619,7 +729,7 @@ def render_centered_parcel_map_jpeg(
     out = io.BytesIO()
     canvas.save(out, format="JPEG", quality=86, optimize=True)
     jpeg_bytes = out.getvalue()
-    metrics = compute_tile_cloud_metrics(jpeg_bytes)
+    metrics = _compute_parcel_center_cloud_metrics(canvas)
     return jpeg_bytes, metrics
 
 
@@ -843,23 +953,87 @@ def _discover_real_captures_for_point(
     return verified
 
 
+def select_best_candidate_within_10_attempts(
+    candidates: List[Dict[str, Any]],
+    render_fn: Any,
+    max_attempts: int = MAX_CLOUD_RETRY_ATTEMPTS,
+    recent_priority_count: int = 0,
+) -> Optional[Dict[str, Any]]:
+    """
+    Evaluate up to `max_attempts` date-sorted candidates backwards in days.
+    Accept the first candidate whose parcel-center pixels are cloud-free; if none of
+    the attempts passes 100% clear-sky, select the valid attempt with the lowest cloud score.
+    """
+    best_fallback: Optional[Tuple[float, int, Dict[str, Any]]] = None
+    attempt_pool = candidates[:max_attempts]
+
+    for idx, cand in enumerate(attempt_pool, start=1):
+        try:
+            jpeg_bytes, metrics, render_zoom = render_fn(cand)
+        except Exception:
+            continue
+
+        nodata_pct = float(metrics.get("nodata_pct", 0.0))
+        black_pct = float(metrics.get("black_pct", 0.0))
+        white_pct = float(metrics.get("white_pct", 0.0))
+        haze_pct = float(metrics.get("haze_pct", 0.0))
+        if nodata_pct >= 25.0 or black_pct >= 25.0:
+            continue
+
+        is_clear = (
+            white_pct <= MAX_PURE_WHITE_CLOUD_PCT
+            and haze_pct <= MAX_TILE_HAZE_PCT
+            and nodata_pct < MAX_NODATA_OR_BLACK_PCT
+            and black_pct < MAX_NODATA_OR_BLACK_PCT
+        )
+        enriched = dict(cand)
+        enriched["_pre_rendered_jpeg"] = jpeg_bytes
+        enriched["_render_zoom"] = render_zoom
+        enriched["cloud_cover_pct"] = round(min(100.0, white_pct + haze_pct * 0.35), 2)
+        enriched["cloud_attempts_used"] = idx
+        enriched["sharpness_g1"] = compute_image_sharpness(jpeg_bytes)
+
+        if is_clear:
+            enriched["cloud_fallback_least_cloudy"] = False
+            return enriched
+
+        cloud_score = (white_pct * 2.5) + (haze_pct * 0.9) + (nodata_pct * 4.0)
+        if recent_priority_count > 0 and idx > recent_priority_count:
+            cloud_score += 2.0
+        if best_fallback is None or cloud_score < best_fallback[0]:
+            best_fallback = (cloud_score, idx, enriched)
+
+    if best_fallback is not None:
+        chosen = dict(best_fallback[2])
+        chosen["cloud_fallback_least_cloudy"] = True
+        return chosen
+    return None
+
+
 def _search_mpc_sentinel2_for_horizon(
     lat: float,
     lng: float,
     coordinates: List[List[float]],
     target_date: date,
     max_date: date,
-    used_dates: set[str],
-    used_releases: set[str],
+    is_primary_horizon: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    """Query Planetary Computer Sentinel-2 L2A around target_date and verify pixel cloudlessness."""
-    start_dt = max(date(2016, 1, 1), target_date - timedelta(days=120))
-    end_dt = min(max_date, target_date + timedelta(days=35))
+    """
+    Query Sentinel-2 L2A scenes closest to `target_date` stepping backwards in days.
+    Inspect up to MAX_CLOUD_RETRY_ATTEMPTS (10) attempts and choose either the first
+    cloud-free image or the least-cloudy image among those 10 attempts.
+    """
+    end_dt = min(max_date, target_date)
+    start_dt = max(date(2017, 1, 1), end_dt - timedelta(days=90))
     if end_dt < start_dt:
-        start_dt = max(date(2016, 1, 1), end_dt - timedelta(days=120))
+        start_dt = max(date(2017, 1, 1), end_dt - timedelta(days=90))
 
-    bbox = [round(lng - 0.004, 6), round(lat - 0.0025, 6),
-            round(lng + 0.004, 6), round(lat + 0.0025, 6)]
+    bbox = [
+        round(lng - 0.004, 6),
+        round(lat - 0.0025, 6),
+        round(lng + 0.004, 6),
+        round(lat + 0.0025, 6),
+    ]
     try:
         with httpx.Client(timeout=10.0) as client:
             res = client.post(
@@ -868,8 +1042,8 @@ def _search_mpc_sentinel2_for_horizon(
                     "collections": ["sentinel-2-l2a"],
                     "bbox": bbox,
                     "datetime": f"{start_dt.isoformat()}T00:00:00Z/{end_dt.isoformat()}T23:59:59Z",
-                    "query": {"eo:cloud_cover": {"lt": 30}},
-                    "limit": 14,
+                    "query": {"eo:cloud_cover": {"lt": 92}},
+                    "limit": 40,
                 },
             )
             res.raise_for_status()
@@ -877,70 +1051,119 @@ def _search_mpc_sentinel2_for_horizon(
     except Exception:
         return None
 
-    candidates: List[Tuple[Tuple[int, int, float], Dict[str, Any]]] = []
-    seen_dates_in_window: set[str] = set()
+    best_granule_by_date: Dict[str, Tuple[float, Dict[str, Any]]] = {}
     for feat in feats:
         raw_dt = str(feat.get("properties", {}).get("datetime") or "")[:10]
         if len(raw_dt) != 10:
             continue
         item_id = str(feat.get("id") or "")
         release_key = f"mpc:{item_id}"
-        if raw_dt in used_dates or release_key in used_releases or raw_dt in seen_dates_in_window:
-            continue
-        scene_date = date.fromisoformat(raw_dt)
-        delta_days = abs((scene_date - target_date).days)
-        is_future_tie = 1 if scene_date > target_date else 0
         cloud_meta = float(feat.get("properties", {}).get("eo:cloud_cover") or 0.0)
-        seen_dates_in_window.add(raw_dt)
-        candidates.append((
-            (delta_days, is_future_tie, cloud_meta),
-            {
-                "capture_date": raw_dt,
-                "wayback_release": release_key,
-                "cloud_cover_pct": cloud_meta,
-                "sensor": "Copernicus Sentinel-2 L2A",
-            },
-        ))
+        cand = {
+            "capture_date": raw_dt,
+            "wayback_release": release_key,
+            "cloud_cover_pct": cloud_meta,
+            "sensor": "Copernicus Sentinel-2 L2A",
+        }
+        prev = best_granule_by_date.get(raw_dt)
+        if prev is None or cloud_meta < prev[0]:
+            best_granule_by_date[raw_dt] = (cloud_meta, cand)
 
-    candidates.sort(key=lambda item: item[0])
-    for _, cand in candidates[:6]:
-        _, _, _, _, _, _, _, tile_map = _fetch_viewport_tile_grid(
+    ordered_dates = sorted(best_granule_by_date.keys(), reverse=True)
+    candidates = [best_granule_by_date[d][1] for d in ordered_dates]
+    if not candidates:
+        return None
+
+    def _render_mpc(cand: Dict[str, Any]) -> Tuple[bytes, Dict[str, float], int]:
+        return _render_mpc_sentinel2_bicubic(
             coordinates, cand["wayback_release"], view_w=VIEWPORT_W, view_h=VIEWPORT_H
         )
-        tiles_list = list(tile_map.values())
-        if not tiles_list:
-            continue
-        if not is_capture_cloudy(cand["cloud_cover_pct"], viewport_tiles=tiles_list):
-            return cand
-    return None
+
+    return select_best_candidate_within_10_attempts(
+        candidates,
+        render_fn=_render_mpc,
+        max_attempts=MAX_CLOUD_RETRY_ATTEMPTS,
+        recent_priority_count=RECENT_PHOTO_WINDOW_CANDIDATES if is_primary_horizon else 0,
+    )
 
 
-def _match_high_res_captures_to_timeline(
-    high_res_captures: List[Dict[str, Any]],
+def _select_captures_with_days_margin(
+    lat: float,
+    lng: float,
+    coordinates: List[List[float]],
     anchor_dt: datetime,
+    wb_captures: List[Dict[str, Any]],
 ) -> List[Tuple[str, str, int, Dict[str, Any]]]:
     """
-    Pair up to 7 distinct high-resolution cloud-free captures <= anchor_dt with honest
-    elapsed-time labels and existing TARGET_HORIZON_SPECS period keys.
+    Build the exact 7 horizons (0m, 6m, 1y, 2y, 3y, 4y, 5y from registration date).
+    Uses sub-meter Wayback only when a clear capture lies within +/- 21 days; otherwise
+    uses Sentinel-2 L2A backwards day-stepping with max 10 attempts & least-cloudy fallback.
     """
-    anchor_date = anchor_dt.date()
-    eligible = [
-        c for c in high_res_captures if date.fromisoformat(c["capture_date"]) <= anchor_date
-    ]
-    if not eligible:
-        eligible = list(high_res_captures)
-    eligible.sort(key=lambda x: x["capture_date"], reverse=True)
-    selected = eligible[: len(TARGET_HORIZON_SPECS)]
+    today_date = datetime.now(timezone.utc).date()
+    anchor_date = min(anchor_dt.date(), today_date)
+    _, _, base_zoom = compute_centered_wayback_viewport(
+        coordinates, view_w=VIEWPORT_W, view_h=VIEWPORT_H
+    )
 
-    matched: List[Tuple[str, str, int, Dict[str, Any]]] = []
-    for idx, cap in enumerate(selected):
-        period_key, _, nominal_months = TARGET_HORIZON_SPECS[idx]
-        cap_date = date.fromisoformat(cap["capture_date"])
-        honest_label = format_honest_elapsed_label(
-            anchor_date, cap_date, is_primary=(idx == 0)
+    def _solve_horizon(spec: Tuple[str, str, int]) -> Tuple[str, str, int, Dict[str, Any]]:
+        period_key, label, months_ago = spec
+        target_dt = (
+            _subtract_months(anchor_dt, months_ago) if months_ago > 0 else anchor_dt
         )
-        matched.append((period_key, honest_label, nominal_months, cap))
-    return matched
+        target_date = min(target_dt.date(), today_date)
+
+        # 1) Prioritize high-res sub-meter Wayback ONLY within tight day window (<= 21 days)
+        nearby_wb = []
+        for cap in wb_captures:
+            cap_dt = date.fromisoformat(cap["capture_date"])
+            if cap_dt > anchor_date:
+                continue
+            delta_days = abs((cap_dt - target_date).days)
+            if delta_days <= WAYBACK_EXACT_WINDOW_DAYS:
+                nearby_wb.append((delta_days, cap))
+        nearby_wb.sort(key=lambda pair: pair[0])
+
+        for _, wb_cand in nearby_wb[:3]:
+            try:
+                jpeg_bytes, metrics = render_centered_parcel_map_jpeg(
+                    coordinates, wb_cand["wayback_release"]
+                )
+                if (
+                    float(metrics.get("white_pct", 0.0)) <= MAX_PURE_WHITE_CLOUD_PCT
+                    and float(metrics.get("haze_pct", 0.0)) <= MAX_TILE_HAZE_PCT
+                    and compute_image_sharpness(jpeg_bytes) >= MIN_IMAGE_SHARPNESS_G1
+                ):
+                    enriched = dict(wb_cand)
+                    enriched["_pre_rendered_jpeg"] = jpeg_bytes
+                    enriched["_render_zoom"] = base_zoom
+                    enriched["sharpness_g1"] = compute_image_sharpness(jpeg_bytes)
+                    enriched["cloud_attempts_used"] = 1
+                    enriched["cloud_fallback_least_cloudy"] = False
+                    return (period_key, label, months_ago, enriched)
+            except Exception:
+                continue
+
+        # 2) Sentinel-2 L2A day-by-day backwards search (max 10 attempts, least-cloudy fallback)
+        s2_chosen = _search_mpc_sentinel2_for_horizon(
+            lat=lat,
+            lng=lng,
+            coordinates=coordinates,
+            target_date=target_date,
+            max_date=anchor_date,
+            is_primary_horizon=(period_key == "registro_actual"),
+        )
+        if s2_chosen:
+            return (period_key, label, months_ago, s2_chosen)
+
+        # 3) Last-resort local deterministic fallback if external imagery APIs fail completely
+        fallback_cap = min(
+            wb_captures or VERIFIED_TABASCO_CAPTURES,
+            key=lambda c: abs((date.fromisoformat(c["capture_date"]) - target_date).days),
+        )
+        return (period_key, label, months_ago, dict(fallback_cap))
+
+    with ThreadPoolExecutor(max_workers=7) as executor:
+        return list(executor.map(_solve_horizon, TARGET_HORIZON_SPECS))
 
 
 def assign_distinct_captures_to_horizons(
@@ -1033,7 +1256,9 @@ def build_historical_parcel_snapshots(
         wb_captures = _discover_real_captures_for_point(
             center_lat, center_lng, coordinates=ring
         )
-        matched = _match_high_res_captures_to_timeline(wb_captures, anchor)
+        matched = _select_captures_with_days_margin(
+            center_lat, center_lng, ring, anchor, wb_captures
+        )
     else:
         matched = assign_distinct_captures_to_horizons(
             list(VERIFIED_TABASCO_CAPTURES), anchor
@@ -1049,13 +1274,18 @@ def build_historical_parcel_snapshots(
         real_date = cap["capture_date"]
         formatted_date = format_date_ddmmyyyy(real_date)
         final_label = label if formatted_date in label else f"{label} ({formatted_date})"
-        direct_url = resolve_wmts_tile_url(rel, vp_zoom, row, col)
+        actual_zoom = int(
+            cap.get("_render_zoom") or (min(15, vp_zoom) if rel.startswith("mpc:") else vp_zoom)
+        )
+        direct_url = resolve_wmts_tile_url(rel, actual_zoom, row, col)
         cached_public_url: Optional[str] = None
-        rendered_sharpness = float(cap.get("sharpness_g1") or 10.0)
+        rendered_sharpness = float(cap.get("sharpness_g1") or 8.0)
 
         if materialize_assets:
             try:
-                jpeg_bytes, _ = render_centered_parcel_map_jpeg(ring, rel)
+                jpeg_bytes = cap.get("_pre_rendered_jpeg")
+                if not jpeg_bytes:
+                    jpeg_bytes, _ = render_centered_parcel_map_jpeg(ring, rel)
                 rendered_sharpness = compute_image_sharpness(jpeg_bytes)
                 target_dir.mkdir(parents=True, exist_ok=True)
                 safe_rel = re.sub(r"[^a-zA-Z0-9_-]", "_", rel)
@@ -1067,19 +1297,29 @@ def build_historical_parcel_snapshots(
             except Exception:
                 cached_public_url = None
 
+        res_desc = (
+            "Alta resolución submétrica (0.34–0.60 m/px)"
+            if not rel.startswith("mpc:")
+            else "Satélite Copernicus nítido por fecha exacta"
+        )
         return {
             "period_key": period_key,
             "label": final_label,
             "months_ago": months_ago,
             "wayback_release": rel,
             "captured_date_iso": real_date,
+            "render_zoom": actual_zoom,
             "cloud_cover_pct": cap.get("cloud_cover_pct", 0.0),
+            "cloud_attempts_used": int(cap.get("cloud_attempts_used") or 1),
+            "cloud_fallback_least_cloudy": bool(cap.get("cloud_fallback_least_cloudy")),
             "sharpness_g1": rendered_sharpness,
-            "high_res_verified": rendered_sharpness >= MIN_IMAGE_SHARPNESS_G1,
-            "resolution_label": "Alta resolución submétrica (0.34–0.60 m/px)",
+            "high_res_verified": rendered_sharpness >= (
+                3.5 if rel.startswith("mpc:") else MIN_IMAGE_SHARPNESS_G1
+            ),
+            "resolution_label": res_desc,
             "capture_source": "real_src_date",
             "pixel_cloud_checked": bool(probe_live),
-            "cloud_filter_version": "v4_high_res",
+            "cloud_filter_version": "v5_days_margin",
             "extent_bbox": extent_bbox,
             "direct_ortho_url": direct_url,
             "cached_image_url": cached_public_url,

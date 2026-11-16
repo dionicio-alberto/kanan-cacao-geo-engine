@@ -1,9 +1,10 @@
 """FastAPI endpoints for Supabase PostGIS / SQLite persistence, CUSTF, and offline sync."""
 
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
+from app.services.admin_roles_engine import verify_admin_requester
 from app.services.local_persistence_engine import (
     get_active_storage_engine,
     get_cached_parcel_map_image,
@@ -65,15 +66,20 @@ def toggle_custf_endpoint(parcel_id: str) -> Dict[str, Any]:
 
 @router.patch("/parcels/{parcel_id}/registration-date")
 def update_registration_date_endpoint(
-    parcel_id: str, payload: UpdateRegistrationDateRequest
+    parcel_id: str,
+    payload: UpdateRegistrationDateRequest,
+    authorization: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
     try:
+        verified_role = verify_admin_requester(
+            authorization=authorization, requester_role=payload.changed_by_role
+        )
         updated = update_parcel_registration_date(
             parcel_id=parcel_id,
             new_date_iso=payload.new_date_iso,
             confirmation_word=payload.confirmation_word,
             changed_by=payload.changed_by,
-            changed_by_role=payload.changed_by_role,
+            changed_by_role=verified_role,
         )
         return {"status": "UPDATED", "parcel": updated}
     except PermissionError as exc:
