@@ -157,26 +157,48 @@ def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) ->
     assert dates == [
         "2025-06-09",
         "2022-04-30",
+        "2021-03-24",
         "2021-02-17",
         "2019-02-24",
         "2017-02-12",
-        "2013-03-31",
-        "2011-04-25",
+        "2015-05-17",
     ]
 
     # Verifica que cambie dinámicamente al seleccionar otra fecha de referencia (2020-01-15)
-    # y que descarte automáticamente tomas cubiertas por nubes (> 25%).
+    # y que descarte automáticamente tomas cubiertas por nubes (metadatos O píxeles blancos).
     assert is_capture_cloudy(cloud_cover_pct=42.0) is True
     assert is_capture_cloudy(cloud_cover_pct=10.0, tile_bytes=b"x" * 1000) is True
-    assert is_capture_cloudy(cloud_cover_pct=5.0, tile_bytes=b"x" * 8000) is False
+
+    import io
+    import numpy as np
+    from PIL import Image
+
+    cloudy_img = Image.new("RGB", (256, 256), (235, 238, 240))
+    cloudy_buf = io.BytesIO()
+    cloudy_img.save(cloudy_buf, format="JPEG", quality=95)
+    assert is_capture_cloudy(cloud_cover_pct=0.0, tile_bytes=cloudy_buf.getvalue()) is True
+
+    rng = np.random.default_rng(7)
+    canopy_arr = np.stack(
+        [
+            rng.integers(32, 65, (256, 256), dtype=np.uint8),
+            rng.integers(68, 110, (256, 256), dtype=np.uint8),
+            rng.integers(25, 50, (256, 256), dtype=np.uint8),
+        ],
+        axis=2,
+    )
+    clear_img = Image.fromarray(canopy_arr, mode="RGB")
+    clear_buf = io.BytesIO()
+    clear_img.save(clear_buf, format="JPEG", quality=92)
+    assert is_capture_cloudy(cloud_cover_pct=0.0, tile_bytes=clear_buf.getvalue()) is False
 
     custom_pool = [
         {"capture_date": "2026-01-01", "wayback_release": "901", "cloud_cover_pct": 85.0},
         {"capture_date": "2022-04-30", "wayback_release": "36557", "cloud_cover_pct": 0.0},
         {"capture_date": "2019-02-24", "wayback_release": "48376", "cloud_cover_pct": 5.0},
         {"capture_date": "2017-02-12", "wayback_release": "239", "cloud_cover_pct": 0.0},
+        {"capture_date": "2015-05-17", "wayback_release": "26751", "cloud_cover_pct": 0.0},
         {"capture_date": "2013-03-31", "wayback_release": "1052", "cloud_cover_pct": 0.0},
-        {"capture_date": "2011-04-25", "wayback_release": "388", "cloud_cover_pct": 0.0},
         {"capture_date": "2010-03-10", "wayback_release": "200", "cloud_cover_pct": 0.0},
         {"capture_date": "2009-01-20", "wayback_release": "150", "cloud_cover_pct": 0.0},
     ]
@@ -194,9 +216,9 @@ def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) ->
 
     cache_dir = Path(tmp_path) / "map_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cached_file = cache_dir / "PAR-CARRIZAL_hace_5_anios_388.jpg"
-    cached_file.write_bytes(b"JPEG_CACHED_BYTES_" * 12)
+    cached_file = cache_dir / "PAR-CARRIZAL_hace_5_anios_1052.jpg"
+    cached_file.write_bytes(b"JPEG_CACHED_BYTES_" * 80)
     served = get_or_download_cached_parcel_map_bytes(
-        "PAR-CARRIZAL", "hace_5_anios", bbox, cache_dir=cache_dir, wayback_release="388"
+        "PAR-CARRIZAL", "hace_5_anios", bbox, cache_dir=cache_dir, wayback_release="1052"
     )
     assert served.startswith(b"JPEG_CACHED_BYTES_")
