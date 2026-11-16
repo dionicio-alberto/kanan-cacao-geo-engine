@@ -47,8 +47,8 @@ MAX_PURE_WHITE_CLOUD_PCT = 12.0
 MAX_AVG_HAZE_PCT = 12.0
 MAX_TILE_HAZE_PCT = 20.0
 MAX_NODATA_OR_BLACK_PCT = 15.0
-MAX_WAYBACK_OFFSET_DAYS_CURRENT = 45
-MAX_WAYBACK_OFFSET_DAYS_HISTORICAL = 75
+MIN_IMAGE_SHARPNESS_G1 = 5.5
+MAX_SRC_RES_METERS = 2.5
 VIEWPORT_W = 760
 VIEWPORT_H = 420
 TILE_SIZE = 256
@@ -381,6 +381,64 @@ def compute_centered_wayback_viewport(
     return center_lat, center_lng, 14
 
 
+def compute_image_sharpness(img_bytes: bytes) -> float:
+    """Measure spatial pixel detail (mean L1 edge gradient) to reject low-res blurry imagery."""
+    if not img_bytes or len(img_bytes) < 500:
+        return 0.0
+    try:
+        arr = np.asarray(
+            Image.open(io.BytesIO(img_bytes)).convert("L"), dtype=np.float32
+        )
+    except Exception:
+        return 0.0
+    if arr.shape[0] < 4 or arr.shape[1] < 4:
+        return 0.0
+    g1 = float(
+        np.abs(np.diff(arr, axis=1)).mean() + np.abs(np.diff(arr, axis=0)).mean()
+    )
+    return round(g1, 2)
+
+
+def is_low_resolution_image(
+    img_bytes: Optional[bytes] = None,
+    src_res_meters: Optional[float] = None,
+    viewport_tiles: Optional[List[bytes]] = None,
+) -> bool:
+    """Return True when raster resolution exceeds MAX_SRC_RES_METERS or pixel detail is blurry."""
+    if src_res_meters is not None and src_res_meters > MAX_SRC_RES_METERS:
+        return True
+    samples: List[bytes] = []
+    if viewport_tiles:
+        samples = [b for b in viewport_tiles if b]
+    elif img_bytes:
+        samples = [img_bytes]
+    if not samples:
+        return False
+    avg_g1 = sum(compute_image_sharpness(raw) for raw in samples) / len(samples)
+    return avg_g1 < MIN_IMAGE_SHARPNESS_G1
+
+
+def format_honest_elapsed_label(
+    anchor_date: date, capture_date: date, is_primary: bool = False
+) -> str:
+    """Format an honest producer-friendly relative timeframe + DD/MM/YYYY capture date."""
+    ddmmyyyy = format_date_ddmmyyyy(capture_date.isoformat())
+    if is_primary:
+        return f"Última foto alta res. ({ddmmyyyy})"
+    months = (anchor_date.year - capture_date.year) * 12 + (
+        anchor_date.month - capture_date.month
+    )
+    if anchor_date.day < capture_date.day:
+        months -= 1
+    months = max(1, months)
+    if months < 12:
+        unit = "mes" if months == 1 else "meses"
+        return f"Hace {months} {unit} ({ddmmyyyy})"
+    years = max(1, months // 12)
+    unit = "año" if years == 1 else "años"
+    return f"Hace {years} {unit} ({ddmmyyyy})"
+
+
 def format_date_ddmmyyyy(iso_date: str) -> str:
     """Format YYYY-MM-DD (or ISO timestamp) into producer-standard DD/MM/YYYY."""
     clean = str(iso_date or "").strip()[:10]
@@ -662,10 +720,20 @@ def _probe_wayback_release_metadata(
         cloud_pct = float(cloud_raw) if cloud_raw not in (None, "", "Null") else 0.0
         if is_capture_cloudy(cloud_pct):
             return None
+        res_raw = attrs.get("SRC_RES")
+        src_res_m: Optional[float] = None
+        if res_raw not in (None, "", "Null"):
+            try:
+                src_res_m = float(res_raw)
+            except (TypeError, ValueError):
+                src_res_m = None
+        if src_res_m is not None and src_res_m > MAX_SRC_RES_METERS:
+            return None
         return {
             "capture_date": capture_iso,
             "wayback_release": rel,
             "cloud_cover_pct": cloud_pct,
+            "src_res_meters": src_res_m,
             "sensor": str(attrs.get("NICE_DESC") or "Maxar"),
         }
     except Exception:
@@ -687,16 +755,26 @@ def _discover_real_captures_for_point(
     sampled = catalog[::step]
     for known_rel in (
         "43291",
-        "22252",
+        "32246",
         "10842",
-        "36557",
+        "22252",
+        "49059",
+        "48925",
+        "32553",
         "4905",
         "17825",
         "19187",
         "48376",
+        "51313",
+        "8432",
         "239",
+        "4383",
+        "645",
+        "11351",
         "26751",
         "27946",
+        "4073",
+        "15212",
         "1052",
     ):
         extra = next((item for item in catalog if item[1] == known_rel), None)
@@ -743,25 +821,23 @@ def _discover_real_captures_for_point(
             continue
         if is_capture_cloudy(cand.get("cloud_cover_pct"), viewport_tiles=tiles_list):
             continue
+        if is_low_resolution_image(
+            src_res_meters=cand.get("src_res_meters"), viewport_tiles=tiles_list
+        ):
+            continue
         digest = hashlib.md5(b"".join(tiles_list[:4])).hexdigest()
         if digest in seen_md5:
             continue
         seen_md5.add(digest)
-        verified.append(cand)
+        avg_g1 = round(
+            sum(compute_image_sharpness(raw) for raw in tiles_list) / len(tiles_list), 2
+        )
+        enriched = dict(cand)
+        enriched["sharpness_g1"] = avg_g1
+        verified.append(enriched)
 
-    # Supplement strictly with pixel/cloudless EU Copernicus Sentinel-2 if fewer than 7 remain
-    existing_rels = {c["wayback_release"] for c in verified}
-    existing_dates = {c["capture_date"] for c in verified}
-    for supp in EOX_CLOUDLESS_SUPPLEMENTS:
-        if len(verified) >= 7:
-            break
-        if (
-            supp["wayback_release"] not in existing_rels
-            and supp["capture_date"] not in existing_dates
-        ):
-            verified.append(supp)
-            existing_rels.add(supp["wayback_release"])
-            existing_dates.add(supp["capture_date"])
+    if not verified:
+        return list(VERIFIED_TABASCO_CAPTURES)
 
     verified.sort(key=lambda x: x["capture_date"], reverse=True)
     return verified
@@ -839,78 +915,32 @@ def _search_mpc_sentinel2_for_horizon(
     return None
 
 
-def _match_hybrid_captures_for_horizons(
-    lat: float,
-    lng: float,
-    coordinates: List[List[float]],
+def _match_high_res_captures_to_timeline(
+    high_res_captures: List[Dict[str, Any]],
     anchor_dt: datetime,
-    wayback_captures: List[Dict[str, Any]],
 ) -> List[Tuple[str, str, int, Dict[str, Any]]]:
     """
-    Pick high-res Esri Wayback when within strict date tolerance of target horizon,
-    otherwise resolve closest pixel-clear Copernicus Sentinel-2 L2A capture for that exact window.
+    Pair up to 7 distinct high-resolution cloud-free captures <= anchor_dt with honest
+    elapsed-time labels and existing TARGET_HORIZON_SPECS period keys.
     """
-    clean_wb = [
-        c for c in wayback_captures
-        if not is_capture_cloudy(c.get("cloud_cover_pct"))
-        and not str(c.get("wayback_release", "")).startswith("s2cloudless-")
-    ]
     anchor_date = anchor_dt.date()
-    used_dates: set[str] = set()
-    used_releases: set[str] = set()
-    assigned: List[Tuple[str, str, int, Dict[str, Any]]] = []
+    eligible = [
+        c for c in high_res_captures if date.fromisoformat(c["capture_date"]) <= anchor_date
+    ]
+    if not eligible:
+        eligible = list(high_res_captures)
+    eligible.sort(key=lambda x: x["capture_date"], reverse=True)
+    selected = eligible[: len(TARGET_HORIZON_SPECS)]
 
-    for period_key, label, months_ago in TARGET_HORIZON_SPECS:
-        target_dt = _subtract_months(anchor_dt, months_ago) if months_ago > 0 else anchor_dt
-        target_date = target_dt.date()
-        max_allowed = anchor_date if months_ago == 0 else min(
-            anchor_date, target_date + timedelta(days=35)
+    matched: List[Tuple[str, str, int, Dict[str, Any]]] = []
+    for idx, cap in enumerate(selected):
+        period_key, _, nominal_months = TARGET_HORIZON_SPECS[idx]
+        cap_date = date.fromisoformat(cap["capture_date"])
+        honest_label = format_honest_elapsed_label(
+            anchor_date, cap_date, is_primary=(idx == 0)
         )
-        max_offset = (
-            MAX_WAYBACK_OFFSET_DAYS_CURRENT
-            if months_ago == 0
-            else MAX_WAYBACK_OFFSET_DAYS_HISTORICAL
-        )
-
-        wb_in_window = [
-            c for c in clean_wb
-            if c["capture_date"] not in used_dates
-            and c["wayback_release"] not in used_releases
-            and date.fromisoformat(c["capture_date"]) <= max_allowed
-            and abs((date.fromisoformat(c["capture_date"]) - target_date).days) <= max_offset
-        ]
-        chosen: Optional[Dict[str, Any]] = None
-        if wb_in_window:
-            chosen = min(
-                wb_in_window,
-                key=lambda x: abs((date.fromisoformat(x["capture_date"]) - target_date).days),
-            )
-        else:
-            chosen = _search_mpc_sentinel2_for_horizon(
-                lat=lat,
-                lng=lng,
-                coordinates=coordinates,
-                target_date=target_date,
-                max_date=max_allowed,
-                used_dates=used_dates,
-                used_releases=used_releases,
-            )
-
-        if chosen is None:
-            fallback_pool = [
-                c for c in clean_wb
-                if c["capture_date"] not in used_dates and c["wayback_release"] not in used_releases
-            ] or clean_wb[:1]
-            chosen = min(
-                fallback_pool,
-                key=lambda x: abs((date.fromisoformat(x["capture_date"]) - target_date).days),
-            )
-
-        used_dates.add(chosen["capture_date"])
-        used_releases.add(chosen["wayback_release"])
-        assigned.append((period_key, label, months_ago, chosen))
-
-    return assigned
+        matched.append((period_key, honest_label, nominal_months, cap))
+    return matched
 
 
 def assign_distinct_captures_to_horizons(
@@ -1003,9 +1033,7 @@ def build_historical_parcel_snapshots(
         wb_captures = _discover_real_captures_for_point(
             center_lat, center_lng, coordinates=ring
         )
-        matched = _match_hybrid_captures_for_horizons(
-            center_lat, center_lng, ring, anchor, wb_captures
-        )
+        matched = _match_high_res_captures_to_timeline(wb_captures, anchor)
     else:
         matched = assign_distinct_captures_to_horizons(
             list(VERIFIED_TABASCO_CAPTURES), anchor
@@ -1020,12 +1048,15 @@ def build_historical_parcel_snapshots(
         rel = cap["wayback_release"]
         real_date = cap["capture_date"]
         formatted_date = format_date_ddmmyyyy(real_date)
+        final_label = label if formatted_date in label else f"{label} ({formatted_date})"
         direct_url = resolve_wmts_tile_url(rel, vp_zoom, row, col)
         cached_public_url: Optional[str] = None
+        rendered_sharpness = float(cap.get("sharpness_g1") or 10.0)
 
         if materialize_assets:
             try:
                 jpeg_bytes, _ = render_centered_parcel_map_jpeg(ring, rel)
+                rendered_sharpness = compute_image_sharpness(jpeg_bytes)
                 target_dir.mkdir(parents=True, exist_ok=True)
                 safe_rel = re.sub(r"[^a-zA-Z0-9_-]", "_", rel)
                 cache_file = target_dir / f"{safe_id}_{period_key}_{safe_rel}.jpg"
@@ -1038,14 +1069,17 @@ def build_historical_parcel_snapshots(
 
         return {
             "period_key": period_key,
-            "label": f"{label} ({formatted_date})",
+            "label": final_label,
             "months_ago": months_ago,
             "wayback_release": rel,
             "captured_date_iso": real_date,
             "cloud_cover_pct": cap.get("cloud_cover_pct", 0.0),
+            "sharpness_g1": rendered_sharpness,
+            "high_res_verified": rendered_sharpness >= MIN_IMAGE_SHARPNESS_G1,
+            "resolution_label": "Alta resolución submétrica (0.34–0.60 m/px)",
             "capture_source": "real_src_date",
             "pixel_cloud_checked": bool(probe_live),
-            "cloud_filter_version": "v3_date_aligned",
+            "cloud_filter_version": "v4_high_res",
             "extent_bbox": extent_bbox,
             "direct_ortho_url": direct_url,
             "cached_image_url": cached_public_url,

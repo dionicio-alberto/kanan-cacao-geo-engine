@@ -198,3 +198,61 @@ def test_parcel_legal_documents_upload_and_download(tmp_path: Path) -> None:
     assert raw_bytes.startswith(b"%PDF-1.4")
     assert ctype == "application/pdf"
     assert fname == "certificado_ejidal.pdf"
+
+
+def test_only_admin_can_update_registration_date_with_confirmar(tmp_path: Path) -> None:
+    import pytest
+    from app.services.local_persistence_engine import update_parcel_registration_date
+
+    db_file = str(tmp_path / "test_admin_regdate.db")
+    sync_offline_parcels(
+        last_pulled_at_ms=None,
+        pushed_parcels=[
+            {
+                "parcel_id": "PAR-REGDATE-01",
+                "producer_name": "Don Carlos",
+                "municipality": "Comalcalco",
+                "area_hectares": 3.2,
+                "coordinates": [
+                    [-93.2845, 18.256],
+                    [-93.281, 18.256],
+                    [-93.281, 18.2525],
+                    [-93.2845, 18.2525],
+                ],
+            }
+        ],
+        db_path=db_file,
+    )
+
+    with pytest.raises(PermissionError):
+        update_parcel_registration_date(
+            parcel_id="PAR-REGDATE-01",
+            new_date_iso="2024-05-10",
+            confirmation_word="confirmar",
+            changed_by="Técnico Campo",
+            changed_by_role="acopiador",
+            db_path=db_file,
+        )
+
+    with pytest.raises(ValueError):
+        update_parcel_registration_date(
+            parcel_id="PAR-REGDATE-01",
+            new_date_iso="2024-05-10",
+            confirmation_word="si",
+            changed_by="Admin ASTRA",
+            changed_by_role="admin_astra",
+            db_path=db_file,
+        )
+
+    updated = update_parcel_registration_date(
+        parcel_id="PAR-REGDATE-01",
+        new_date_iso="2024-05-10",
+        confirmation_word="confirmar",
+        changed_by="Dirección de Operaciones ASTRA",
+        changed_by_role="admin_astra",
+        db_path=db_file,
+    )
+    assert updated["registered_at_iso"].startswith("2024-05-10")
+    assert len(updated["registration_audit_log"]) == 1
+    assert updated["registration_audit_log"][0]["new_date_iso"] == "2024-05-10"
+    assert updated["registration_audit_log"][0]["changed_by"] == "Dirección de Operaciones ASTRA"
