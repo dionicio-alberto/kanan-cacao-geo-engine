@@ -1306,8 +1306,11 @@ def _select_captures_with_days_margin(
 ) -> List[Tuple[str, str, int, Dict[str, Any]]]:
     """
     Build the exact 7 horizons (0m, 6m, 1y, 2y, 3y, 4y, 5y from registration date).
-    Uses sub-meter Wayback only when a clear capture lies within +/- 21 days; otherwise
-    uses Sentinel-2 L2A backwards day-stepping with max 10 attempts & least-cloudy fallback.
+    STANDARDIZACIÓN COPERNICUS SENTINEL:
+    Usa escenas Copernicus Sentinel-2 L2A como fuente primaria y soberana para cada
+    horizonte (revisita cada 5 días y 100% gratuita, sin cuotas comerciales).
+    Si un horizonte histórico anual requiere cobertura total sin nubes, recurre a
+    Sentinel-2 Cloudless (EOX ESA). Solo usa catálogo local como respaldo de contingencia.
     """
     today_date = datetime.now(timezone.utc).date()
     anchor_date = min(anchor_dt.date(), today_date)
@@ -1322,7 +1325,58 @@ def _select_captures_with_days_margin(
         )
         target_date = min(target_dt.date(), today_date)
 
-        # 1) Prioritize high-res sub-meter Wayback ONLY within tight day window (<= 21 days)
+        # 1) PRIORIDAD SOBERANA: Copernicus Sentinel-2 L2A (STAC abierto, cada 5 días, gratis)
+        s2_chosen = _search_mpc_sentinel2_for_horizon(
+            lat=lat,
+            lng=lng,
+            coordinates=coordinates,
+            target_date=target_date,
+            max_date=anchor_date,
+            is_primary_horizon=(period_key == "registro_actual"),
+        )
+        if s2_chosen:
+            try:
+                hd_jpeg, s2_metrics, s2_zoom = _render_mpc_sentinel2_bicubic(
+                    coordinates=coordinates,
+                    release=s2_chosen["wayback_release"],
+                    view_w=HD_VIEWPORT_W,
+                    view_h=HD_VIEWPORT_H,
+                )
+                s2_chosen["_pre_rendered_jpeg"] = hd_jpeg
+                s2_chosen["_render_zoom"] = s2_zoom
+                s2_chosen["sharpness_g1"] = compute_image_sharpness(hd_jpeg)
+                s2_chosen["sensor"] = "Copernicus Sentinel-2 L2A"
+            except Exception:
+                pass
+            return (period_key, label, months_ago, s2_chosen)
+
+        # 2) PRIORIDAD HISTÓRICA: Copernicus Sentinel-2 Cloudless (EOX ESA)
+        target_year = target_date.year
+        eox_cand = next(
+            (
+                c
+                for c in EOX_CLOUDLESS_SUPPLEMENTS
+                if c["capture_date"].startswith(str(target_year))
+            ),
+            None,
+        )
+        if eox_cand:
+            try:
+                jpeg_bytes, metrics = render_centered_parcel_map_jpeg(
+                    coordinates, eox_cand["wayback_release"]
+                )
+                enriched = dict(eox_cand)
+                enriched["_pre_rendered_jpeg"] = jpeg_bytes
+                enriched["_render_zoom"] = base_zoom
+                enriched["sharpness_g1"] = compute_image_sharpness(jpeg_bytes)
+                enriched["cloud_attempts_used"] = 1
+                enriched["cloud_fallback_least_cloudy"] = False
+                enriched["sensor"] = "Copernicus Sentinel-2 EU (Cloudless)"
+                return (period_key, label, months_ago, enriched)
+            except Exception:
+                pass
+
+        # 3) Fallback local de contingencia (sin conexión a STAC / pruebas unitarias offline)
         nearby_wb = []
         for cap in wb_captures:
             cap_dt = date.fromisoformat(cap["capture_date"])
@@ -1353,42 +1407,6 @@ def _select_captures_with_days_margin(
             except Exception:
                 continue
 
-        # 2) Sentinel-2 L2A day-by-day backwards search (max 20 attempts, least-cloudy fallback)
-        s2_chosen = _search_mpc_sentinel2_for_horizon(
-            lat=lat,
-            lng=lng,
-            coordinates=coordinates,
-            target_date=target_date,
-            max_date=anchor_date,
-            is_primary_horizon=(period_key == "registro_actual"),
-        )
-        if s2_chosen:
-            s2_date = date.fromisoformat(s2_chosen["capture_date"])
-            wb_pool = wb_captures or VERIFIED_TABASCO_CAPTURES
-            closest_wb = min(
-                wb_pool,
-                key=lambda w: abs((date.fromisoformat(w["capture_date"]) - s2_date).days),
-            )
-            try:
-                rz_1x = float(
-                    s2_chosen.get("_render_zoom") or min(16.75, base_zoom)
-                )
-                hd_jpeg, exact_1x = _render_hd_pansharpened_sentinel2(
-                    coordinates=coordinates,
-                    s2_release=s2_chosen["wayback_release"],
-                    wb_release=closest_wb["wayback_release"],
-                    render_zoom_1x=rz_1x,
-                    months_ago=months_ago,
-                )
-                s2_chosen["_pre_rendered_jpeg"] = hd_jpeg
-                s2_chosen["_render_zoom"] = exact_1x
-                s2_chosen["sharpness_g1"] = compute_image_sharpness(hd_jpeg)
-                s2_chosen["hd_pansharpened_ref"] = closest_wb["wayback_release"]
-            except Exception:
-                pass
-            return (period_key, label, months_ago, s2_chosen)
-
-        # 3) Last-resort local deterministic fallback if external imagery APIs fail completely
         fallback_cap = min(
             wb_captures or VERIFIED_TABASCO_CAPTURES,
             key=lambda c: abs((date.fromisoformat(c["capture_date"]) - target_date).days),
@@ -1538,16 +1556,20 @@ def build_historical_parcel_snapshots(
             except Exception:
                 cached_public_url = None
 
-        res_desc = (
-            "Alta Definición 2x HD (1520×840 · Submétrica)"
-            if not rel.startswith("mpc:")
-            else "Alta Definición 2x HD (1520×840 · Fusión submétrica por fecha)"
-        )
+        sensor_name = str(cap.get("sensor") or "Copernicus Sentinel-2 L2A")
+        if rel.startswith("mpc:"):
+            res_desc = "Copernicus Sentinel-2 L2A (10 m/px nativo · Libre/Gratis · Revisit 5 días)"
+        elif rel.startswith("s2cloudless-"):
+            res_desc = "Copernicus Sentinel-2 Cloudless (10 m/px · Mosaico Anual ESA)"
+        else:
+            res_desc = f"{sensor_name} (Respaldo offline)"
+
         return {
             "period_key": period_key,
             "label": final_label,
             "months_ago": months_ago,
             "wayback_release": rel,
+            "sensor": sensor_name,
             "captured_date_iso": real_date,
             "render_zoom": actual_zoom,
             "image_width": HD_VIEWPORT_W,
@@ -1560,7 +1582,7 @@ def build_historical_parcel_snapshots(
             "resolution_label": res_desc,
             "capture_source": "real_src_date",
             "pixel_cloud_checked": bool(probe_live),
-            "cloud_filter_version": "v9_cacaotrack_hd",
+            "cloud_filter_version": "v10_sentinel2_standard",
             "extent_bbox": extent_bbox,
             "direct_ortho_url": direct_url,
             "cached_image_url": cached_public_url,
