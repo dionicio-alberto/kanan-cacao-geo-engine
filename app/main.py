@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.api.routes_admin_roles import router as admin_roles_router
 from app.api.routes_custody import router as custody_router
 from app.api.routes_persistence import router as persistence_router
 from app.api.routes_spatial import router as spatial_router
@@ -57,6 +58,7 @@ app.add_middleware(
 app.include_router(spatial_router)
 app.include_router(custody_router)
 app.include_router(persistence_router)
+app.include_router(admin_roles_router)
 
 
 @app.get("/health")

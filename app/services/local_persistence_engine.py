@@ -254,20 +254,16 @@ def supabase_row_to_parcel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
     persisted_bbox = properties.get("extent_bbox")
     has_real_distinct_dates = (
         isinstance(persisted_snapshots, list)
-        and 5 <= len(persisted_snapshots) <= 7
+        and len(persisted_snapshots) == 7
         and all(
             item.get("capture_source") == "real_src_date"
             and bool(item.get("wayback_release"))
             and bool(item.get("pixel_cloud_checked"))
-            and item.get("cloud_filter_version") == "v4_high_res"
-            and bool(item.get("high_res_verified"))
+            and item.get("cloud_filter_version") == "v5_days_margin"
             and bool(item.get("cached_image_url"))
             for item in persisted_snapshots
         )
-        and len({item.get("wayback_release") for item in persisted_snapshots})
-        == len(persisted_snapshots)
-        and len({item.get("captured_date_iso") for item in persisted_snapshots})
-        == len(persisted_snapshots)
+        and len({item.get("captured_date_iso") for item in persisted_snapshots}) == 7
     )
     if (
         has_real_distinct_dates
