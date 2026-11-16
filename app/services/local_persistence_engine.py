@@ -5,9 +5,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import uuid
 import httpx
 from app.services.custody_epcis_engine import register_epcis_reception
@@ -21,18 +22,32 @@ DEFAULT_DB_PATH = os.environ.get(
     "KANAN_LOCAL_DB_PATH",
     str(Path(__file__).resolve().parents[2] / "data" / "kanan_local.db"),
 )
+DEFAULT_DOCS_DIR = Path(
+    os.environ.get(
+        "KANAN_DOCS_DIR",
+        str(Path(__file__).resolve().parents[2] / "data" / "parcel_docs"),
+    )
+)
+SUPABASE_DOCS_BUCKET = "parcel-documents"
 
 DEFAULT_PRODUCER_UUID = "11111111-1111-4111-8111-111111111111"
 DEFAULT_TECH_UUID = "44444444-4444-4444-8444-444444444444"
 DEFAULT_COLLECTOR_UUID = "55555555-5555-4555-8555-555555555555"
 
+DOCUMENT_TYPE_LABELS: Dict[str, str] = {
+    "CERTIFICADO_PARCELARIO": "Certificado parcelario / ejidal",
+    "TITULO_PROPIEDAD": "Título de propiedad o escritura",
+    "CUSTF_SEMARNAT": "Constancia ambiental y permiso de limpieza",
+}
+
 PARCEL_SELECT_FIELDS = (
     "id,producer_id,parcel_name,municipality,area_hectares,geojson_payload,"
-    "eudr_status,acahual_removal_post_2020,updated_at,"
+    "eudr_status,acahual_removal_post_2020,captured_at,created_at,updated_at,"
     "profiles!parcels_producer_id_fkey(full_name,is_blocked_by_custf),"
     "eudr_audits(mean_ndvi_score,sentinel_scene_id),"
     "shade_tree_inventories(tree_count),"
-    "legality_documents(id,document_type,verified_by_admin),"
+    "legality_documents(id,document_type,encrypted_storage_uri,"
+    "sha256_hash,verified_by_admin,uploaded_at,verified_at),"
     "epcis_collection_events(delivered_dry_equivalent_kg)"
 )
 
@@ -168,6 +183,31 @@ def _as_uuid(raw_id: str, fallback_uuid: Optional[str] = None) -> str:
         return str(uuid.uuid5(uuid.NAMESPACE_OID, str(raw_id)))
 
 
+def _format_legal_doc_row(parcel_id: str, doc: Dict[str, Any]) -> Dict[str, Any]:
+    doc_id = str(doc.get("id") or "legacy-doc")
+    doc_type = str(doc.get("document_type") or "CERTIFICADO_PARCELARIO")
+    uri = str(doc.get("encrypted_storage_uri") or "")
+    file_name = uri.rsplit("/", 1)[-1] if "/" in uri else f"{doc_type.lower()}.pdf"
+    if file_name.endswith(".enc"):
+        file_name = file_name[:-4]
+    can_download = uri.startswith("storage://") or uri.startswith("local://")
+    return {
+        "id": doc_id,
+        "parcel_id": parcel_id,
+        "document_type": doc_type,
+        "document_label": DOCUMENT_TYPE_LABELS.get(doc_type, doc_type),
+        "file_name": file_name,
+        "sha256_hash": str(doc.get("sha256_hash") or ""),
+        "verified_by_admin": bool(doc.get("verified_by_admin")),
+        "uploaded_at": doc.get("uploaded_at") or doc.get("verified_at"),
+        "download_url": (
+            f"/api/v1/parcels/{parcel_id}/documents/{doc_id}/file"
+            if can_download
+            else None
+        ),
+    }
+
+
 def supabase_row_to_parcel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
     """Convert a Supabase PostgREST parcels row with nested relations into API parcel dict."""
     profile = row.get("profiles") or {}
@@ -193,6 +233,10 @@ def supabase_row_to_parcel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
     cumulative_dry_kg = sum(
         float(ev.get("delivered_dry_equivalent_kg") or 0.0) for ev in events
     )
+    registered_at_iso = (
+        row.get("captured_at") or row.get("created_at") or row.get("updated_at")
+    )
+    mapped_documents = [_format_legal_doc_row(str(row["id"]), d) for d in docs]
 
     payload = row.get("geojson_payload") or {}
     geom = payload.get("geometry") or {}
@@ -214,6 +258,9 @@ def supabase_row_to_parcel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
         and all(
             item.get("capture_source") == "real_src_date"
             and bool(item.get("wayback_release"))
+            and bool(item.get("pixel_cloud_checked"))
+            and item.get("cloud_filter_version") == "v2"
+            and bool(item.get("cached_image_url"))
             for item in persisted_snapshots
         )
         and len({item.get("wayback_release") for item in persisted_snapshots}) == 7
@@ -231,7 +278,7 @@ def supabase_row_to_parcel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
         hist_bundle = build_historical_parcel_snapshots(
             row["id"],
             coords,
-            registered_at_iso=row.get("updated_at"),
+            registered_at_iso=registered_at_iso,
             probe_live=False,
         )
         historical_snapshots = hist_bundle["snapshots"]
@@ -255,6 +302,8 @@ def supabase_row_to_parcel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
         "is_topology_valid": True,
         "coordinates": coords,
         "extent_bbox": extent_bbox,
+        "registered_at_iso": registered_at_iso,
+        "documents": mapped_documents,
         "historical_snapshots": historical_snapshots,
         "persisted_on_server": snapshots_cached_on_server,
         "updated_at_ms": _iso_to_ms(row.get("updated_at")),
@@ -269,7 +318,7 @@ def _fetch_supabase_parcels(parcel_id: Optional[str] = None) -> List[Dict[str, A
     }
     if parcel_id:
         params["id"] = f"eq.{parcel_id}"
-    with httpx.Client(timeout=10.0) as client:
+    with httpx.Client(timeout=15.0) as client:
         resp = client.get(f"{url}/rest/v1/parcels", params=params, headers=_pg_headers())
         resp.raise_for_status()
         rows = resp.json()
@@ -278,11 +327,13 @@ def _fetch_supabase_parcels(parcel_id: Optional[str] = None) -> List[Dict[str, A
         for raw_row in rows:
             mapped = supabase_row_to_parcel_dict(raw_row)
             if not mapped.get("persisted_on_server"):
+                reg_iso = mapped.get("registered_at_iso")
                 hist_live = build_historical_parcel_snapshots(
                     raw_row["id"],
                     mapped["coordinates"],
-                    registered_at_iso=raw_row.get("updated_at"),
+                    registered_at_iso=reg_iso,
                     probe_live=True,
+                    materialize_assets=True,
                 )
                 mapped["historical_snapshots"] = hist_live["snapshots"]
                 mapped["extent_bbox"] = hist_live["extent_bbox"]
@@ -399,11 +450,16 @@ def _sync_supabase_parcels(pushed_parcels: List[Dict[str, Any]]) -> Dict[str, An
             }:
                 producer_uuid = DEFAULT_PRODUCER_UUID
 
+            reg_iso = (
+                incoming.get("registered_at_iso")
+                or datetime.now(timezone.utc).isoformat()
+            )
             hist_bundle = build_historical_parcel_snapshots(
                 pg_id,
                 lint_report["polygon"]["coordinates"][0],
-                registered_at_iso=incoming.get("registered_at_iso"),
+                registered_at_iso=reg_iso,
                 probe_live=True,
+                materialize_assets=True,
             )
             geojson_payload = {
                 "type": "Feature",
@@ -434,6 +490,7 @@ def _sync_supabase_parcels(pushed_parcels: List[Dict[str, Any]]) -> Dict[str, An
                     "acahual_removal_post_2020": bool(
                         incoming.get("acahual_removal_post_2020", False)
                     ),
+                    "captured_at": reg_iso,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 },
             )
@@ -595,6 +652,21 @@ def init_local_db(db_path: Optional[str] = None) -> None:
                 payload_sha256 TEXT NOT NULL,
                 epcis_json TEXT NOT NULL,
                 event_time_iso TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS parcel_documents (
+                id TEXT PRIMARY KEY,
+                parcel_id TEXT NOT NULL,
+                document_type TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                sha256_hash TEXT NOT NULL,
+                storage_path TEXT NOT NULL,
+                verified_by_admin INTEGER NOT NULL DEFAULT 1,
+                uploaded_at TEXT NOT NULL
             )
             """
         )
@@ -905,7 +977,7 @@ def get_or_create_parcel_historical_snapshots(
     db_path: Optional[str] = None,
     reference_date_iso: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Return 7 distinct historical snapshots centered on the parcel."""
+    """Return 7 distinct cloud-free historical snapshots centered on the parcel."""
     if is_supabase_rw_active(db_path):
         try:
             rows = _fetch_supabase_parcels(parcel_id=parcel_id)
@@ -915,13 +987,16 @@ def get_or_create_parcel_historical_snapshots(
                     custom_hist = build_historical_parcel_snapshots(
                         target["parcel_id"],
                         target["coordinates"],
+                        registered_at_iso=target.get("registered_at_iso"),
                         reference_date_iso=reference_date_iso,
                         probe_live=True,
+                        materialize_assets=False,
                     )
                     return {
                         "parcel_id": target["parcel_id"],
                         "storage_engine": "supabase_postgis",
                         "persisted_on_server": True,
+                        "registered_at_iso": target.get("registered_at_iso"),
                         "extent_bbox": custom_hist["extent_bbox"],
                         "snapshots": custom_hist["snapshots"],
                     }
@@ -929,8 +1004,10 @@ def get_or_create_parcel_historical_snapshots(
                     "parcel_id": target["parcel_id"],
                     "storage_engine": "supabase_postgis",
                     "persisted_on_server": True,
+                    "registered_at_iso": target.get("registered_at_iso"),
                     "extent_bbox": target["extent_bbox"],
                     "snapshots": target["historical_snapshots"],
+                    "coordinates": target["coordinates"],
                 }
         except httpx.HTTPError:
             pass
@@ -972,6 +1049,7 @@ def get_or_create_parcel_historical_snapshots(
         "storage_engine": get_active_storage_engine(db_path),
         "persisted_on_server": True,
         "extent_bbox": bbox,
+        "coordinates": parcel["coordinates"],
         "snapshots": snapshots,
     }
 
@@ -981,8 +1059,9 @@ def get_cached_parcel_map_image(
     period_key: str,
     db_path: Optional[str] = None,
     cache_dir: Optional[Path] = None,
+    wayback_release: Optional[str] = None,
 ) -> bytes:
-    """Serve cached JPEG map centered on parcel, downloading only once if absent."""
+    """Serve cached JPEG map centered on parcel, composing/downloading only once."""
     manifest = get_or_create_parcel_historical_snapshots(parcel_id, db_path=db_path)
     matching = next(
         (s for s in manifest["snapshots"] if s["period_key"] == period_key), None
@@ -996,5 +1075,232 @@ def get_cached_parcel_map_image(
         extent_bbox=matching["extent_bbox"],
         months_ago=int(matching["months_ago"]),
         cache_dir=cache_dir,
-        wayback_release=matching.get("wayback_release"),
+        wayback_release=wayback_release or matching.get("wayback_release"),
+        coordinates=manifest.get("coordinates"),
+        cached_image_url=None if wayback_release else matching.get("cached_image_url"),
     )
+
+
+def _guess_content_type(file_name: str) -> str:
+    lower = file_name.lower()
+    if lower.endswith(".pdf"):
+        return "application/pdf"
+    if lower.endswith(".png"):
+        return "image/png"
+    if lower.endswith(".webp"):
+        return "image/webp"
+    return "image/jpeg"
+
+
+def list_parcel_documents(
+    parcel_id: str, db_path: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Return all legal documents attached to a parcel."""
+    if is_supabase_rw_active(db_path):
+        url, _ = _get_supabase_config()
+        with httpx.Client(timeout=10.0) as client:
+            res = client.get(
+                f"{url}/rest/v1/legality_documents",
+                params={
+                    "parcel_id": f"eq.{parcel_id}",
+                    "select": (
+                        "id,parcel_id,document_type,encrypted_storage_uri,"
+                        "sha256_hash,verified_by_admin,uploaded_at,verified_at"
+                    ),
+                    "order": "uploaded_at.desc",
+                },
+                headers=_pg_headers(),
+            )
+            res.raise_for_status()
+            return [_format_legal_doc_row(parcel_id, d) for d in res.json()]
+
+    init_local_db(db_path)
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM parcel_documents WHERE parcel_id = ? ORDER BY uploaded_at DESC",
+            (parcel_id,),
+        ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "parcel_id": r["parcel_id"],
+                "document_type": r["document_type"],
+                "document_label": DOCUMENT_TYPE_LABELS.get(
+                    r["document_type"], r["document_type"]
+                ),
+                "file_name": r["file_name"],
+                "sha256_hash": r["sha256_hash"],
+                "verified_by_admin": bool(r["verified_by_admin"]),
+                "uploaded_at": r["uploaded_at"],
+                "download_url": (
+                    f"/api/v1/parcels/{parcel_id}/documents/{r['id']}/file"
+                ),
+            }
+            for r in rows
+        ]
+
+
+def upload_parcel_document(
+    parcel_id: str,
+    document_type: str,
+    file_name: str,
+    file_bytes: bytes,
+    content_type: Optional[str] = None,
+    db_path: Optional[str] = None,
+    docs_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Validate, hash, store file in Supabase Storage (or disk), and record DB metadata."""
+    if document_type not in DOCUMENT_TYPE_LABELS:
+        raise ValueError(f"Tipo de documento no permitido: {document_type}")
+    if not file_bytes:
+        raise ValueError("El archivo adjunto está vacío.")
+    if len(file_bytes) > 10 * 1024 * 1024:
+        raise ValueError("El archivo supera el límite de 10 MB.")
+
+    safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", Path(file_name).name) or "documento.pdf"
+    doc_id = str(uuid.uuid4())
+    sha256_hash = hashlib.sha256(file_bytes).hexdigest()
+    resolved_ctype = content_type or _guess_content_type(safe_name)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    if is_supabase_rw_active(db_path):
+        url, key = _get_supabase_config()
+        with httpx.Client(timeout=15.0) as client:
+            p_res = client.get(
+                f"{url}/rest/v1/parcels",
+                params={"id": f"eq.{parcel_id}", "select": "id,producer_id"},
+                headers=_pg_headers(),
+            )
+            p_res.raise_for_status()
+            p_rows = p_res.json()
+            if not p_rows:
+                raise ValueError(f"Parcela {parcel_id} no encontrada.")
+            producer_id = p_rows[0]["producer_id"]
+
+            object_path = f"{parcel_id}/{doc_id}/{safe_name}"
+            st_res = client.post(
+                f"{url}/storage/v1/object/{SUPABASE_DOCS_BUCKET}/{object_path}",
+                headers={
+                    "apikey": key,
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": resolved_ctype,
+                    "x-upsert": "true",
+                },
+                content=file_bytes,
+            )
+            st_res.raise_for_status()
+
+            db_res = client.post(
+                f"{url}/rest/v1/legality_documents",
+                headers=_pg_headers("return=representation"),
+                json={
+                    "id": doc_id,
+                    "parcel_id": parcel_id,
+                    "producer_id": producer_id,
+                    "document_type": document_type,
+                    "encrypted_storage_uri": f"storage://{SUPABASE_DOCS_BUCKET}/{object_path}",
+                    "sha256_hash": sha256_hash,
+                    "verified_by_admin": True,
+                    "verified_at": now_iso,
+                    "uploaded_at": now_iso,
+                    "updated_at": now_iso,
+                },
+            )
+            db_res.raise_for_status()
+            inserted = db_res.json()[0]
+            return _format_legal_doc_row(parcel_id, inserted)
+
+    init_local_db(db_path)
+    target_dir = docs_dir or DEFAULT_DOCS_DIR
+    target_dir.mkdir(parents=True, exist_ok=True)
+    safe_pid = re.sub(r"[^a-zA-Z0-9_-]", "_", parcel_id)
+    local_file = target_dir / f"{safe_pid}_{doc_id}_{safe_name}"
+    local_file.write_bytes(file_bytes)
+
+    with _connect(db_path) as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM parcels WHERE parcel_id = ?", (parcel_id,)
+        ).fetchone()
+        if not exists:
+            raise ValueError(f"Parcela {parcel_id} no encontrada en base local.")
+        conn.execute(
+            """
+            INSERT INTO parcel_documents (
+                id, parcel_id, document_type, file_name, content_type,
+                sha256_hash, storage_path, verified_by_admin, uploaded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+            """,
+            (
+                doc_id,
+                parcel_id,
+                document_type,
+                safe_name,
+                resolved_ctype,
+                sha256_hash,
+                str(local_file),
+                now_iso,
+            ),
+        )
+        conn.commit()
+
+    return {
+        "id": doc_id,
+        "parcel_id": parcel_id,
+        "document_type": document_type,
+        "document_label": DOCUMENT_TYPE_LABELS[document_type],
+        "file_name": safe_name,
+        "sha256_hash": sha256_hash,
+        "verified_by_admin": True,
+        "uploaded_at": now_iso,
+        "download_url": f"/api/v1/parcels/{parcel_id}/documents/{doc_id}/file",
+    }
+
+
+def get_parcel_document_file(
+    parcel_id: str,
+    doc_id: str,
+    db_path: Optional[str] = None,
+) -> Tuple[bytes, str, str]:
+    """Download file bytes, content_type and file_name for a stored parcel document."""
+    if is_supabase_rw_active(db_path):
+        url, key = _get_supabase_config()
+        with httpx.Client(timeout=15.0) as client:
+            res = client.get(
+                f"{url}/rest/v1/legality_documents",
+                params={
+                    "id": f"eq.{doc_id}",
+                    "parcel_id": f"eq.{parcel_id}",
+                    "select": "id,document_type,encrypted_storage_uri",
+                },
+                headers=_pg_headers(),
+            )
+            res.raise_for_status()
+            rows = res.json()
+            if not rows:
+                raise ValueError(f"Documento {doc_id} no encontrado para parcela {parcel_id}.")
+            uri = str(rows[0].get("encrypted_storage_uri") or "")
+            prefix = f"storage://{SUPABASE_DOCS_BUCKET}/"
+            if not uri.startswith(prefix):
+                raise ValueError("Este documento legado solo cuenta con folio de referencia.")
+            object_path = uri[len(prefix):]
+            file_name = object_path.rsplit("/", 1)[-1]
+            dl_res = client.get(
+                f"{url}/storage/v1/object/{SUPABASE_DOCS_BUCKET}/{object_path}",
+                headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            )
+            dl_res.raise_for_status()
+            ctype = dl_res.headers.get("content-type") or _guess_content_type(file_name)
+            return dl_res.content, ctype, file_name
+
+    init_local_db(db_path)
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM parcel_documents WHERE id = ? AND parcel_id = ?",
+            (doc_id, parcel_id),
+        ).fetchone()
+        if not row:
+            raise ValueError(f"Documento {doc_id} no encontrado.")
+        path = Path(row["storage_path"])
+        if not path.exists():
+            raise ValueError("Archivo físico no disponible en disco.")
+        return path.read_bytes(), row["content_type"], row["file_name"]
