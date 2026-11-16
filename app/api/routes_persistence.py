@@ -14,6 +14,7 @@ from app.services.local_persistence_engine import (
     record_persisted_reception,
     sync_offline_parcels,
     toggle_parcel_custf,
+    update_parcel_registration_date,
     upload_parcel_document,
 )
 
@@ -30,6 +31,13 @@ class PersistedReceptionRequest(BaseModel):
     delivered_dry_equivalent_kg: float = Field(..., gt=0.0)
     requester_role: str = Field(default="acopiador")
     read_point_id: str = Field(default="urn:epc:id:sgln:7500000.00001.0")
+
+
+class UpdateRegistrationDateRequest(BaseModel):
+    new_date_iso: str = Field(..., min_length=10, max_length=32)
+    confirmation_word: str = Field(..., min_length=1)
+    changed_by: str = Field(..., min_length=1)
+    changed_by_role: str = Field(..., min_length=1)
 
 
 @router.get("/parcels")
@@ -53,6 +61,25 @@ def toggle_custf_endpoint(parcel_id: str) -> Dict[str, Any]:
         }
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.patch("/parcels/{parcel_id}/registration-date")
+def update_registration_date_endpoint(
+    parcel_id: str, payload: UpdateRegistrationDateRequest
+) -> Dict[str, Any]:
+    try:
+        updated = update_parcel_registration_date(
+            parcel_id=parcel_id,
+            new_date_iso=payload.new_date_iso,
+            confirmation_word=payload.confirmation_word,
+            changed_by=payload.changed_by,
+            changed_by_role=payload.changed_by_role,
+        )
+        return {"status": "UPDATED", "parcel": updated}
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/parcels/sync")

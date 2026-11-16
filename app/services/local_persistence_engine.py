@@ -1,6 +1,6 @@
 """Supabase PostGIS and SQLite persistence engine for Kanan Cacao R/W and offline sync."""
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import hashlib
 import json
 import os
@@ -254,17 +254,20 @@ def supabase_row_to_parcel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
     persisted_bbox = properties.get("extent_bbox")
     has_real_distinct_dates = (
         isinstance(persisted_snapshots, list)
-        and len(persisted_snapshots) == 7
+        and 5 <= len(persisted_snapshots) <= 7
         and all(
             item.get("capture_source") == "real_src_date"
             and bool(item.get("wayback_release"))
             and bool(item.get("pixel_cloud_checked"))
-            and item.get("cloud_filter_version") == "v3_date_aligned"
+            and item.get("cloud_filter_version") == "v4_high_res"
+            and bool(item.get("high_res_verified"))
             and bool(item.get("cached_image_url"))
             for item in persisted_snapshots
         )
-        and len({item.get("wayback_release") for item in persisted_snapshots}) == 7
-        and len({item.get("captured_date_iso") for item in persisted_snapshots}) == 7
+        and len({item.get("wayback_release") for item in persisted_snapshots})
+        == len(persisted_snapshots)
+        and len({item.get("captured_date_iso") for item in persisted_snapshots})
+        == len(persisted_snapshots)
     )
     if (
         has_real_distinct_dates
@@ -285,6 +288,7 @@ def supabase_row_to_parcel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
         extent_bbox = hist_bundle["extent_bbox"]
         snapshots_cached_on_server = False
 
+    audit_log = properties.get("registration_audit_log") or []
     return {
         "parcel_id": row["id"],
         "parcel_name": parcel_name,
@@ -303,6 +307,7 @@ def supabase_row_to_parcel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
         "coordinates": coords,
         "extent_bbox": extent_bbox,
         "registered_at_iso": registered_at_iso,
+        "registration_audit_log": audit_log if isinstance(audit_log, list) else [],
         "documents": mapped_documents,
         "historical_snapshots": historical_snapshots,
         "persisted_on_server": snapshots_cached_on_server,
@@ -670,6 +675,28 @@ def init_local_db(db_path: Optional[str] = None) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS registration_audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                parcel_id TEXT NOT NULL,
+                previous_date_iso TEXT NOT NULL,
+                new_date_iso TEXT NOT NULL,
+                changed_by TEXT NOT NULL,
+                changed_by_role TEXT NOT NULL,
+                changed_at_iso TEXT NOT NULL,
+                confirmation_text TEXT NOT NULL
+            )
+            """
+        )
+        for extra_col in (
+            "ALTER TABLE parcels ADD COLUMN registered_at_iso TEXT",
+            "ALTER TABLE parcels ADD COLUMN historical_snapshots_json TEXT",
+        ):
+            try:
+                conn.execute(extra_col)
+            except sqlite3.OperationalError:
+                pass
         count = conn.execute("SELECT COUNT(*) FROM parcels").fetchone()[0]
         if count == 0:
             for item in SEED_PARCELS:
@@ -735,6 +762,12 @@ def _row_to_parcel_dict(row: sqlite3.Row) -> Dict[str, Any]:
         "is_topology_valid": bool(row["is_topology_valid"]),
         "coordinates": coords,
         "extent_bbox": hist_bundle.get("extent_bbox"),
+        "registered_at_iso": (
+            row["registered_at_iso"]
+            if "registered_at_iso" in row.keys() and row["registered_at_iso"]
+            else hist_bundle.get("registered_at_iso")
+        ),
+        "registration_audit_log": hist_bundle.get("registration_audit_log", []),
         "historical_snapshots": hist_bundle.get("snapshots", []),
         "persisted_on_server": persisted_flag,
         "updated_at_ms": int(row["updated_at_ms"]),
@@ -1304,3 +1337,156 @@ def get_parcel_document_file(
         if not path.exists():
             raise ValueError("Archivo físico no disponible en disco.")
         return path.read_bytes(), row["content_type"], row["file_name"]
+
+
+def update_parcel_registration_date(
+    parcel_id: str,
+    new_date_iso: str,
+    confirmation_word: str,
+    changed_by: str,
+    changed_by_role: str,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Allow ONLY admin_astra to modify parcel registration date with explicit 'confirmar'
+    confirmation, recalculating high-res snapshots and saving an immutable audit log entry.
+    """
+    if changed_by_role.strip().lower() != "admin_astra":
+        raise PermissionError(
+            "Acceso denegado: únicamente un administrador (admin_astra) puede cambiar "
+            "la fecha de registro de una parcela."
+        )
+    if confirmation_word.strip().lower() != "confirmar":
+        raise ValueError(
+            "Confirmación inválida: debes escribir exactamente la palabra 'confirmar' "
+            "para alterar la fecha de registro."
+        )
+    try:
+        parsed_new = date.fromisoformat(new_date_iso.strip()[:10])
+    except ValueError as exc:
+        raise ValueError("Formato de fecha inválido; se esperaba YYYY-MM-DD.") from exc
+
+    new_iso = f"{parsed_new.isoformat()}T12:00:00+00:00"
+    changed_at_iso = datetime.now(timezone.utc).isoformat()
+
+    if is_supabase_rw_active(db_path):
+        url, _ = _get_supabase_config()
+        with httpx.Client(timeout=20.0) as client:
+            res = client.get(
+                f"{url}/rest/v1/parcels",
+                params={"id": f"eq.{parcel_id}", "select": PARCEL_SELECT_FIELDS},
+                headers=_pg_headers(),
+            )
+            res.raise_for_status()
+            rows = res.json()
+            if not rows:
+                raise ValueError(f"Parcela {parcel_id} no encontrada.")
+            raw_row = rows[0]
+            previous_raw = (
+                raw_row.get("captured_at")
+                or raw_row.get("created_at")
+                or raw_row.get("updated_at")
+                or changed_at_iso
+            )
+            mapped = supabase_row_to_parcel_dict(raw_row)
+            hist_live = build_historical_parcel_snapshots(
+                parcel_id,
+                mapped["coordinates"],
+                registered_at_iso=new_iso,
+                probe_live=True,
+                materialize_assets=True,
+            )
+            payload = dict(raw_row.get("geojson_payload") or {})
+            props = dict(payload.get("properties") or {})
+            audit_list = list(props.get("registration_audit_log") or [])
+            audit_entry = {
+                "previous_date_iso": str(previous_raw)[:10],
+                "new_date_iso": parsed_new.isoformat(),
+                "changed_by": changed_by.strip() or "Administrador ASTRA",
+                "changed_by_role": changed_by_role,
+                "changed_at_iso": changed_at_iso,
+                "confirmation_text": "confirmar",
+            }
+            audit_list.insert(0, audit_entry)
+            props["extent_bbox"] = hist_live["extent_bbox"]
+            props["historical_snapshots"] = hist_live["snapshots"]
+            props["registration_audit_log"] = audit_list
+            payload["properties"] = props
+
+            patch_res = client.patch(
+                f"{url}/rest/v1/parcels",
+                params={"id": f"eq.{parcel_id}"},
+                headers=_pg_headers(),
+                json={
+                    "captured_at": new_iso,
+                    "geojson_payload": payload,
+                    "updated_at": changed_at_iso,
+                },
+            )
+            patch_res.raise_for_status()
+        updated = _fetch_supabase_parcels(parcel_id=parcel_id)
+        if not updated:
+            raise ValueError(f"No se pudo recargar la parcela {parcel_id}.")
+        return updated[0]
+
+    init_local_db(db_path)
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM parcels WHERE parcel_id = ?", (parcel_id,)
+        ).fetchone()
+        if not row:
+            raise ValueError(f"Parcela {parcel_id} no encontrada en base local.")
+        parcel = _row_to_parcel_dict(row)
+        prev_iso = str(parcel.get("registered_at_iso") or changed_at_iso)[:10]
+        hist_bundle = build_historical_parcel_snapshots(
+            parcel_id,
+            parcel["coordinates"],
+            registered_at_iso=new_iso,
+            probe_live=False,
+        )
+        audit_list = list(parcel.get("registration_audit_log") or [])
+        audit_entry = {
+            "previous_date_iso": prev_iso,
+            "new_date_iso": parsed_new.isoformat(),
+            "changed_by": changed_by.strip() or "Administrador ASTRA",
+            "changed_by_role": changed_by_role,
+            "changed_at_iso": changed_at_iso,
+            "confirmation_text": "confirmar",
+        }
+        audit_list.insert(0, audit_entry)
+        hist_bundle["registration_audit_log"] = audit_list
+        conn.execute(
+            """
+            INSERT INTO registration_audit_logs (
+                parcel_id, previous_date_iso, new_date_iso,
+                changed_by, changed_by_role, changed_at_iso, confirmation_text
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                parcel_id,
+                prev_iso,
+                parsed_new.isoformat(),
+                audit_entry["changed_by"],
+                changed_by_role,
+                changed_at_iso,
+                "confirmar",
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE parcels
+            SET registered_at_iso = ?, historical_snapshots_json = ?, updated_at_ms = ?
+            WHERE parcel_id = ?
+            """,
+            (
+                new_iso,
+                json.dumps(hist_bundle),
+                int(time.time() * 1000),
+                parcel_id,
+            ),
+        )
+        conn.commit()
+        updated_row = conn.execute(
+            "SELECT * FROM parcels WHERE parcel_id = ?", (parcel_id,)
+        ).fetchone()
+        return _row_to_parcel_dict(updated_row)
