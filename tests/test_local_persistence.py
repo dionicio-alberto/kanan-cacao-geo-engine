@@ -256,3 +256,52 @@ def test_only_admin_can_update_registration_date_with_confirmar(tmp_path: Path) 
     assert len(updated["registration_audit_log"]) == 1
     assert updated["registration_audit_log"][0]["new_date_iso"] == "2024-05-10"
     assert updated["registration_audit_log"][0]["changed_by"] == "Dirección de Operaciones ASTRA"
+
+
+def test_admin_can_assign_profile_roles_and_edit_role_definitions(tmp_path: Path) -> None:
+    import pytest
+    from app.services.admin_roles_engine import (
+        assign_role_to_profile,
+        list_admin_profiles_and_roles,
+        upsert_role_definition,
+    )
+
+    db_file = str(tmp_path / "test_admin_roles.db")
+    panel = list_admin_profiles_and_roles(db_path=db_file)
+    assert len(panel["profiles"]) >= 4
+    assert any(r["role_key"] == "admin_astra" for r in panel["roles"])
+
+    with pytest.raises(PermissionError):
+        assign_role_to_profile(
+            user_id="11111111-1111-4111-8111-111111111111",
+            new_role_key="auditor_sustentabilidad",
+            changed_by="Usuario no admin",
+            requester_role="acopiador",
+            db_path=db_file,
+        )
+
+    after_create = upsert_role_definition(
+        role_key="inspector_campo",
+        display_name="Inspector de Campo Cacao",
+        description="Supervisa levantamiento en parcelas y bitácora.",
+        permissions={"can_view_parcels": True, "can_edit_logbook": True},
+        changed_by="Dirección de Operaciones ASTRA",
+        requester_role="admin_astra",
+        db_path=db_file,
+    )
+    assert any(r["role_key"] == "inspector_campo" for r in after_create["roles"])
+
+    after_assign = assign_role_to_profile(
+        user_id="11111111-1111-4111-8111-111111111111",
+        new_role_key="inspector_campo",
+        changed_by="Dirección de Operaciones ASTRA",
+        requester_role="admin_astra",
+        db_path=db_file,
+    )
+    mateo = next(
+        p
+        for p in after_assign["profiles"]
+        if p["user_id"] == "11111111-1111-4111-8111-111111111111"
+    )
+    assert mateo["role"] == "inspector_campo"
+    assert mateo["role_display_name"] == "Inspector de Campo Cacao"

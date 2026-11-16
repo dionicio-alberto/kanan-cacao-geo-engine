@@ -244,3 +244,43 @@ def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) ->
         "PAR-CARRIZAL", "hace_5_anios", bbox, cache_dir=cache_dir, wayback_release="1052"
     )
     assert served.startswith(b"JPEG_CACHED_BYTES_")
+
+    from app.services.satellite_audit_engine import select_best_candidate_within_10_attempts
+
+    cands_10 = [{"capture_date": f"2026-05-{15 - i:02d}", "wayback_release": f"mpc:S{i}"}
+                for i in range(12)]
+
+    def fake_render_cloudy_except_least(cand):
+        day = int(cand["capture_date"][-2:])
+        white_score = 9.0 if day != 10 else 6.5
+        return clear_buf.getvalue(), {
+            "white_pct": white_score,
+            "haze_pct": 4.0,
+            "nodata_pct": 0.0,
+            "black_pct": 0.0,
+        }, 15
+
+    fallback_pick = select_best_candidate_within_10_attempts(
+        cands_10, render_fn=fake_render_cloudy_except_least, max_attempts=10
+    )
+    assert fallback_pick is not None
+    assert fallback_pick["capture_date"] == "2026-05-10"
+    assert fallback_pick["cloud_fallback_least_cloudy"] is True
+
+    def fake_render_3rd_clear(cand):
+        day = int(cand["capture_date"][-2:])
+        if day > 13:
+            return clear_buf.getvalue(), {
+                "white_pct": 30.0, "haze_pct": 25.0, "nodata_pct": 0.0, "black_pct": 0.0
+            }, 15
+        return clear_buf.getvalue(), {
+            "white_pct": 0.5, "haze_pct": 1.0, "nodata_pct": 0.0, "black_pct": 0.0
+        }, 15
+
+    clear_pick = select_best_candidate_within_10_attempts(
+        cands_10, render_fn=fake_render_3rd_clear, max_attempts=10
+    )
+    assert clear_pick is not None
+    assert clear_pick["capture_date"] == "2026-05-13"
+    assert clear_pick["cloud_attempts_used"] == 3
+    assert clear_pick["cloud_fallback_least_cloudy"] is False
