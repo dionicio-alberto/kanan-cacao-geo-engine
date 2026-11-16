@@ -79,9 +79,14 @@ def persisted_reception_endpoint(payload: PersistedReceptionRequest) -> Dict[str
 
 
 @router.get("/parcels/{parcel_id}/historical-snapshots")
-def get_historical_snapshots_endpoint(parcel_id: str) -> Dict[str, Any]:
+def get_historical_snapshots_endpoint(
+    parcel_id: str,
+    reference_date_iso: Optional[str] = None,
+) -> Dict[str, Any]:
     try:
-        return get_or_create_parcel_historical_snapshots(parcel_id)
+        return get_or_create_parcel_historical_snapshots(
+            parcel_id, reference_date_iso=reference_date_iso
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

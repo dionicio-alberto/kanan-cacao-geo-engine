@@ -121,20 +121,25 @@ def test_sentinel2_live_endpoint_returns_ortho_and_stac_metadata() -> None:
 
 
 def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) -> None:
+    from datetime import datetime, timezone
     from pathlib import Path
     from app.services.satellite_audit_engine import (
+        assign_distinct_captures_to_horizons,
         build_historical_parcel_snapshots,
         fit_bbox_to_aspect_ratio,
         get_or_download_cached_parcel_map_bytes,
+        is_capture_cloudy,
     )
 
     coords = [
-        [-93.2845, 18.2560],
-        [-93.2810, 18.2560],
-        [-93.2810, 18.2525],
-        [-93.2845, 18.2525],
+        [-93.391603, 18.034157],
+        [-93.390618, 18.034270],
+        [-93.390500, 18.032900],
+        [-93.391500, 18.032800],
     ]
-    bundle = build_historical_parcel_snapshots("PAR-HIST-01", coords, "2026-11-15T12:00:00Z")
+    bundle = build_historical_parcel_snapshots(
+        "PAR-CARRIZAL", coords, registered_at_iso="2026-11-15T12:00:00Z", probe_live=False
+    )
     keys = [item["period_key"] for item in bundle["snapshots"]]
     assert keys == [
         "registro_actual",
@@ -146,7 +151,42 @@ def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) ->
         "hace_5_anios",
     ]
     releases = [item["wayback_release"] for item in bundle["snapshots"]]
+    dates = [item["captured_date_iso"] for item in bundle["snapshots"]]
     assert len(set(releases)) == 7
+    assert len(set(dates)) == 7
+    assert dates == [
+        "2025-06-09",
+        "2022-04-30",
+        "2021-02-17",
+        "2019-02-24",
+        "2017-02-12",
+        "2013-03-31",
+        "2011-04-25",
+    ]
+
+    # Verifica que cambie dinámicamente al seleccionar otra fecha de referencia (2020-01-15)
+    # y que descarte automáticamente tomas cubiertas por nubes (> 25%).
+    assert is_capture_cloudy(cloud_cover_pct=42.0) is True
+    assert is_capture_cloudy(cloud_cover_pct=10.0, tile_bytes=b"x" * 1000) is True
+    assert is_capture_cloudy(cloud_cover_pct=5.0, tile_bytes=b"x" * 8000) is False
+
+    custom_pool = [
+        {"capture_date": "2026-01-01", "wayback_release": "901", "cloud_cover_pct": 85.0},
+        {"capture_date": "2022-04-30", "wayback_release": "36557", "cloud_cover_pct": 0.0},
+        {"capture_date": "2019-02-24", "wayback_release": "48376", "cloud_cover_pct": 5.0},
+        {"capture_date": "2017-02-12", "wayback_release": "239", "cloud_cover_pct": 0.0},
+        {"capture_date": "2013-03-31", "wayback_release": "1052", "cloud_cover_pct": 0.0},
+        {"capture_date": "2011-04-25", "wayback_release": "388", "cloud_cover_pct": 0.0},
+        {"capture_date": "2010-03-10", "wayback_release": "200", "cloud_cover_pct": 0.0},
+        {"capture_date": "2009-01-20", "wayback_release": "150", "cloud_cover_pct": 0.0},
+    ]
+    assigned = assign_distinct_captures_to_horizons(
+        custom_pool, datetime(2020, 1, 15, tzinfo=timezone.utc)
+    )
+    assigned_dates = [cap["capture_date"] for _, _, _, cap in assigned]
+    assert "2026-01-01" not in assigned_dates
+    assert assigned_dates[0] == "2019-02-24"
+
     bbox = bundle["extent_bbox"]
     assert round((bbox[2] - bbox[0]) / (bbox[3] - bbox[1]), 2) == 1.75
     fitted = fit_bbox_to_aspect_ratio([-93.2275, 18.2085, -93.2185, 18.2175], 1.75)
@@ -154,9 +194,9 @@ def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) ->
 
     cache_dir = Path(tmp_path) / "map_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cached_file = cache_dir / "PAR-HIST-01_hace_5_anios_26751.jpg"
+    cached_file = cache_dir / "PAR-CARRIZAL_hace_5_anios_388.jpg"
     cached_file.write_bytes(b"JPEG_CACHED_BYTES_" * 12)
     served = get_or_download_cached_parcel_map_bytes(
-        "PAR-HIST-01", "hace_5_anios", bbox, cache_dir=cache_dir
+        "PAR-CARRIZAL", "hace_5_anios", bbox, cache_dir=cache_dir, wayback_release="388"
     )
     assert served.startswith(b"JPEG_CACHED_BYTES_")
