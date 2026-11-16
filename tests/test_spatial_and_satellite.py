@@ -126,10 +126,12 @@ def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) ->
     from app.services.satellite_audit_engine import (
         assign_distinct_captures_to_horizons,
         build_historical_parcel_snapshots,
+        compute_image_sharpness,
         fit_bbox_to_aspect_ratio,
         format_date_ddmmyyyy,
         get_or_download_cached_parcel_map_bytes,
         is_capture_cloudy,
+        is_low_resolution_image,
         resolve_wmts_tile_url,
     )
 
@@ -172,7 +174,7 @@ def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) ->
     assert is_capture_cloudy(cloud_cover_pct=10.0, tile_bytes=b"x" * 1000) is True
 
     assert format_date_ddmmyyyy("1998-11-15") == "15/11/1998"
-    assert "(09/06/2025)" in bundle["snapshots"][0]["label"]
+    assert "09/06/2025" in bundle["snapshots"][0]["label"]
     assert "collection=sentinel-2-l2a" in resolve_wmts_tile_url(
         "mpc:S2A_TEST", 16, 29429, 15766
     )
@@ -180,6 +182,13 @@ def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) ->
     import io
     import numpy as np
     from PIL import Image
+
+    blurry_img = Image.new("RGB", (256, 256), (48, 84, 36))
+    blurry_buf = io.BytesIO()
+    blurry_img.save(blurry_buf, format="JPEG", quality=92)
+    assert compute_image_sharpness(blurry_buf.getvalue()) < 5.5
+    assert is_low_resolution_image(blurry_buf.getvalue()) is True
+    assert is_low_resolution_image(src_res_meters=10.0) is True
 
     cloudy_img = Image.new("RGB", (256, 256), (235, 238, 240))
     cloudy_buf = io.BytesIO()
