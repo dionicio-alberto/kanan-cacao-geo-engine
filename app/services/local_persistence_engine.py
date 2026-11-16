@@ -208,13 +208,19 @@ def supabase_row_to_parcel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
 
     persisted_snapshots = properties.get("historical_snapshots")
     persisted_bbox = properties.get("extent_bbox")
-    has_wayback = (
+    has_real_distinct_dates = (
         isinstance(persisted_snapshots, list)
         and len(persisted_snapshots) == 7
-        and all(bool(item.get("wayback_release")) for item in persisted_snapshots)
+        and all(
+            item.get("capture_source") == "real_src_date"
+            and bool(item.get("wayback_release"))
+            for item in persisted_snapshots
+        )
+        and len({item.get("wayback_release") for item in persisted_snapshots}) == 7
+        and len({item.get("captured_date_iso") for item in persisted_snapshots}) == 7
     )
     if (
-        has_wayback
+        has_real_distinct_dates
         and isinstance(persisted_bbox, list)
         and len(persisted_bbox) == 4
     ):
@@ -223,7 +229,10 @@ def supabase_row_to_parcel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
         snapshots_cached_on_server = True
     else:
         hist_bundle = build_historical_parcel_snapshots(
-            row["id"], coords, row.get("updated_at")
+            row["id"],
+            coords,
+            registered_at_iso=row.get("updated_at"),
+            probe_live=False,
         )
         historical_snapshots = hist_bundle["snapshots"]
         extent_bbox = hist_bundle["extent_bbox"]
@@ -269,6 +278,14 @@ def _fetch_supabase_parcels(parcel_id: Optional[str] = None) -> List[Dict[str, A
         for raw_row in rows:
             mapped = supabase_row_to_parcel_dict(raw_row)
             if not mapped.get("persisted_on_server"):
+                hist_live = build_historical_parcel_snapshots(
+                    raw_row["id"],
+                    mapped["coordinates"],
+                    registered_at_iso=raw_row.get("updated_at"),
+                    probe_live=True,
+                )
+                mapped["historical_snapshots"] = hist_live["snapshots"]
+                mapped["extent_bbox"] = hist_live["extent_bbox"]
                 payload = dict(raw_row.get("geojson_payload") or {})
                 props = dict(payload.get("properties") or {})
                 props["extent_bbox"] = mapped["extent_bbox"]
@@ -383,7 +400,10 @@ def _sync_supabase_parcels(pushed_parcels: List[Dict[str, Any]]) -> Dict[str, An
                 producer_uuid = DEFAULT_PRODUCER_UUID
 
             hist_bundle = build_historical_parcel_snapshots(
-                pg_id, lint_report["polygon"]["coordinates"][0]
+                pg_id,
+                lint_report["polygon"]["coordinates"][0],
+                registered_at_iso=incoming.get("registered_at_iso"),
+                probe_live=True,
             )
             geojson_payload = {
                 "type": "Feature",
@@ -881,14 +901,30 @@ def record_persisted_reception(
 
 
 def get_or_create_parcel_historical_snapshots(
-    parcel_id: str, db_path: Optional[str] = None
+    parcel_id: str,
+    db_path: Optional[str] = None,
+    reference_date_iso: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Return the persisted 7 historical snapshots centered on the parcel without recalculating."""
+    """Return 7 distinct historical snapshots centered on the parcel."""
     if is_supabase_rw_active(db_path):
         try:
             rows = _fetch_supabase_parcels(parcel_id=parcel_id)
             if rows:
                 target = rows[0]
+                if reference_date_iso:
+                    custom_hist = build_historical_parcel_snapshots(
+                        target["parcel_id"],
+                        target["coordinates"],
+                        reference_date_iso=reference_date_iso,
+                        probe_live=True,
+                    )
+                    return {
+                        "parcel_id": target["parcel_id"],
+                        "storage_engine": "supabase_postgis",
+                        "persisted_on_server": True,
+                        "extent_bbox": custom_hist["extent_bbox"],
+                        "snapshots": custom_hist["snapshots"],
+                    }
                 return {
                     "parcel_id": target["parcel_id"],
                     "storage_engine": "supabase_postgis",
@@ -907,9 +943,18 @@ def get_or_create_parcel_historical_snapshots(
         if not row:
             raise ValueError(f"Parcela {parcel_id} no encontrada en base de datos.")
         parcel = _row_to_parcel_dict(row)
-        if not parcel.get("persisted_on_server"):
+        if reference_date_iso:
+            custom_hist = build_historical_parcel_snapshots(
+                parcel["parcel_id"],
+                parcel["coordinates"],
+                reference_date_iso=reference_date_iso,
+                probe_live=False,
+            )
+            snapshots = custom_hist["snapshots"]
+            bbox = custom_hist["extent_bbox"]
+        elif not parcel.get("persisted_on_server"):
             hist_bundle = build_historical_parcel_snapshots(
-                parcel["parcel_id"], parcel["coordinates"]
+                parcel["parcel_id"], parcel["coordinates"], probe_live=False
             )
             conn.execute(
                 "UPDATE parcels SET historical_snapshots_json = ? WHERE parcel_id = ?",
@@ -951,4 +996,5 @@ def get_cached_parcel_map_image(
         extent_bbox=matching["extent_bbox"],
         months_ago=int(matching["months_ago"]),
         cache_dir=cache_dir,
+        wayback_release=matching.get("wayback_release"),
     )
