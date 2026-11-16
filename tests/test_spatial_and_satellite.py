@@ -127,8 +127,10 @@ def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) ->
         assign_distinct_captures_to_horizons,
         build_historical_parcel_snapshots,
         fit_bbox_to_aspect_ratio,
+        format_date_ddmmyyyy,
         get_or_download_cached_parcel_map_bytes,
         is_capture_cloudy,
+        resolve_wmts_tile_url,
     )
 
     coords = [
@@ -169,6 +171,12 @@ def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) ->
     assert is_capture_cloudy(cloud_cover_pct=42.0) is True
     assert is_capture_cloudy(cloud_cover_pct=10.0, tile_bytes=b"x" * 1000) is True
 
+    assert format_date_ddmmyyyy("1998-11-15") == "15/11/1998"
+    assert "(09/06/2025)" in bundle["snapshots"][0]["label"]
+    assert "collection=sentinel-2-l2a" in resolve_wmts_tile_url(
+        "mpc:S2A_TEST", 16, 29429, 15766
+    )
+
     import io
     import numpy as np
     from PIL import Image
@@ -177,6 +185,11 @@ def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) ->
     cloudy_buf = io.BytesIO()
     cloudy_img.save(cloudy_buf, format="JPEG", quality=95)
     assert is_capture_cloudy(cloud_cover_pct=0.0, tile_bytes=cloudy_buf.getvalue()) is True
+
+    nodata_img = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+    nodata_buf = io.BytesIO()
+    nodata_img.save(nodata_buf, format="PNG")
+    assert is_capture_cloudy(cloud_cover_pct=0.0, tile_bytes=nodata_buf.getvalue()) is True
 
     rng = np.random.default_rng(7)
     canopy_arr = np.stack(
