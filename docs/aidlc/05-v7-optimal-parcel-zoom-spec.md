@@ -10,3 +10,4 @@
 ## Verification
 - Pruebas unitarias validando monotonicidad (`zoom_chica > zoom_mediana > zoom_grande`) y centrado perfecto del polígono respecto a `(VIEWPORT_W / 2, VIEWPORT_H / 2)`.
 - Re-materialización `v7_optimal_zoom` en Supabase PostGIS / Storage.
+
