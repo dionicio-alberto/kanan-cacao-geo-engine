@@ -113,3 +113,35 @@ def test_supabase_row_maps_to_parcel_contract() -> None:
     assert mapped["cumulative_dry_kg"] == 300.0
     assert mapped["ndvi_alert_level"] == "VIGOR_AGROFORESTAL_OPTIMO"
     assert len(mapped["coordinates"]) == 5
+
+
+def test_historical_snapshots_are_persisted_once_with_parcel_sync(tmp_path: Path) -> None:
+    from app.services.local_persistence_engine import (
+        get_or_create_parcel_historical_snapshots,
+    )
+
+    db_file = str(tmp_path / "test_hist_sync.db")
+    sync_offline_parcels(
+        last_pulled_at_ms=None,
+        pushed_parcels=[
+            {
+                "parcel_id": "PAR-CACHE-ONCE-01",
+                "producer_name": "Don Mateo",
+                "municipality": "Comalcalco",
+                "area_hectares": 3.0,
+                "coordinates": [
+                    [-93.2845, 18.2560],
+                    [-93.2810, 18.2560],
+                    [-93.2810, 18.2525],
+                    [-93.2845, 18.2525],
+                ],
+            }
+        ],
+        db_path=db_file,
+    )
+
+    manifest = get_or_create_parcel_historical_snapshots("PAR-CACHE-ONCE-01", db_path=db_file)
+    assert manifest["persisted_on_server"] is True
+    assert len(manifest["snapshots"]) == 7
+    assert manifest["snapshots"][0]["period_key"] == "registro_actual"
+    assert manifest["snapshots"][-1]["period_key"] == "hace_5_anios"

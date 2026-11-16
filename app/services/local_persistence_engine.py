@@ -11,6 +11,10 @@ from typing import Any, Dict, List, Optional
 import uuid
 import httpx
 from app.services.custody_epcis_engine import register_epcis_reception
+from app.services.satellite_audit_engine import (
+    build_historical_parcel_snapshots,
+    get_or_download_cached_parcel_map_bytes,
+)
 from app.services.topology_engine import lint_and_validate_polygon
 
 DEFAULT_DB_PATH = os.environ.get(
@@ -192,6 +196,7 @@ def supabase_row_to_parcel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
 
     payload = row.get("geojson_payload") or {}
     geom = payload.get("geometry") or {}
+    properties = payload.get("properties") or {}
     rings = geom.get("coordinates") or []
     coords = rings[0] if rings and isinstance(rings[0], list) else [
         [-93.2845, 18.2560],
@@ -200,6 +205,25 @@ def supabase_row_to_parcel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
         [-93.2845, 18.2525],
         [-93.2845, 18.2560],
     ]
+
+    persisted_snapshots = properties.get("historical_snapshots")
+    persisted_bbox = properties.get("extent_bbox")
+    if (
+        isinstance(persisted_snapshots, list)
+        and len(persisted_snapshots) == 7
+        and isinstance(persisted_bbox, list)
+        and len(persisted_bbox) == 4
+    ):
+        historical_snapshots = persisted_snapshots
+        extent_bbox = persisted_bbox
+        snapshots_cached_on_server = True
+    else:
+        hist_bundle = build_historical_parcel_snapshots(
+            row["id"], coords, row.get("updated_at")
+        )
+        historical_snapshots = hist_bundle["snapshots"]
+        extent_bbox = hist_bundle["extent_bbox"]
+        snapshots_cached_on_server = False
 
     return {
         "parcel_id": row["id"],
@@ -217,6 +241,9 @@ def supabase_row_to_parcel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
         "cumulative_dry_kg": cumulative_dry_kg,
         "is_topology_valid": True,
         "coordinates": coords,
+        "extent_bbox": extent_bbox,
+        "historical_snapshots": historical_snapshots,
+        "persisted_on_server": snapshots_cached_on_server,
         "updated_at_ms": _iso_to_ms(row.get("updated_at")),
     }
 
@@ -233,7 +260,28 @@ def _fetch_supabase_parcels(parcel_id: Optional[str] = None) -> List[Dict[str, A
         resp = client.get(f"{url}/rest/v1/parcels", params=params, headers=_pg_headers())
         resp.raise_for_status()
         rows = resp.json()
-    return [supabase_row_to_parcel_dict(r) for r in rows]
+
+        results: List[Dict[str, Any]] = []
+        for raw_row in rows:
+            mapped = supabase_row_to_parcel_dict(raw_row)
+            if not mapped.get("persisted_on_server"):
+                payload = dict(raw_row.get("geojson_payload") or {})
+                props = dict(payload.get("properties") or {})
+                props["extent_bbox"] = mapped["extent_bbox"]
+                props["historical_snapshots"] = mapped["historical_snapshots"]
+                payload["properties"] = props
+                try:
+                    client.patch(
+                        f"{url}/rest/v1/parcels",
+                        params={"id": f"eq.{raw_row['id']}"},
+                        headers=_pg_headers(),
+                        json={"geojson_payload": payload},
+                    )
+                    mapped["persisted_on_server"] = True
+                except httpx.HTTPError:
+                    pass
+            results.append(mapped)
+    return results
 
 
 def _toggle_supabase_custf(parcel_id: str) -> Dict[str, Any]:
@@ -330,6 +378,9 @@ def _sync_supabase_parcels(pushed_parcels: List[Dict[str, Any]]) -> Dict[str, An
             }:
                 producer_uuid = DEFAULT_PRODUCER_UUID
 
+            hist_bundle = build_historical_parcel_snapshots(
+                pg_id, lint_report["polygon"]["coordinates"][0]
+            )
             geojson_payload = {
                 "type": "Feature",
                 "geometry": lint_report["polygon"],
@@ -338,6 +389,8 @@ def _sync_supabase_parcels(pushed_parcels: List[Dict[str, Any]]) -> Dict[str, An
                     "municipality": municipality,
                     "hectares": area_ha,
                     "externalParcelId": raw_pid,
+                    "extent_bbox": hist_bundle["extent_bbox"],
+                    "historical_snapshots": hist_bundle["snapshots"],
                 },
             }
 
@@ -493,10 +546,17 @@ def init_local_db(db_path: Optional[str] = None) -> None:
                 cumulative_dry_kg REAL NOT NULL DEFAULT 0.0,
                 is_topology_valid INTEGER NOT NULL DEFAULT 1,
                 coordinates_json TEXT NOT NULL,
+                historical_snapshots_json TEXT,
                 updated_at_ms INTEGER NOT NULL
             )
             """
         )
+        try:
+            conn.execute(
+                "ALTER TABLE parcels ADD COLUMN historical_snapshots_json TEXT"
+            )
+        except sqlite3.OperationalError:
+            pass
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS epcis_receptions (
@@ -517,6 +577,9 @@ def init_local_db(db_path: Optional[str] = None) -> None:
         count = conn.execute("SELECT COUNT(*) FROM parcels").fetchone()[0]
         if count == 0:
             for item in SEED_PARCELS:
+                hist_bundle = build_historical_parcel_snapshots(
+                    item["parcel_id"], item["coordinates"]
+                )
                 conn.execute(
                     """
                     INSERT INTO parcels (
@@ -524,8 +587,9 @@ def init_local_db(db_path: Optional[str] = None) -> None:
                         area_hectares, eudr_status, ndvi_alert_level, mean_ndvi,
                         shade_tree_count, acahual_removal_post_2020,
                         has_verified_custf_permit, cumulative_dry_kg,
-                        is_topology_valid, coordinates_json, updated_at_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        is_topology_valid, coordinates_json,
+                        historical_snapshots_json, updated_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         item["parcel_id"],
@@ -542,6 +606,7 @@ def init_local_db(db_path: Optional[str] = None) -> None:
                         item["cumulative_dry_kg"],
                         1 if item["is_topology_valid"] else 0,
                         json.dumps(item["coordinates"]),
+                        json.dumps(hist_bundle),
                         item["updated_at_ms"],
                     ),
                 )
@@ -549,6 +614,15 @@ def init_local_db(db_path: Optional[str] = None) -> None:
 
 
 def _row_to_parcel_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    coords = json.loads(row["coordinates_json"])
+    has_hist_col = "historical_snapshots_json" in row.keys()
+    raw_hist = row["historical_snapshots_json"] if has_hist_col else None
+    if raw_hist:
+        hist_bundle = json.loads(raw_hist)
+        persisted_flag = True
+    else:
+        hist_bundle = build_historical_parcel_snapshots(row["parcel_id"], coords)
+        persisted_flag = False
     return {
         "parcel_id": row["parcel_id"],
         "producer_id": row["producer_id"],
@@ -563,7 +637,10 @@ def _row_to_parcel_dict(row: sqlite3.Row) -> Dict[str, Any]:
         "has_verified_custf_permit": bool(row["has_verified_custf_permit"]),
         "cumulative_dry_kg": float(row["cumulative_dry_kg"]),
         "is_topology_valid": bool(row["is_topology_valid"]),
-        "coordinates": json.loads(row["coordinates_json"]),
+        "coordinates": coords,
+        "extent_bbox": hist_bundle.get("extent_bbox"),
+        "historical_snapshots": hist_bundle.get("snapshots", []),
+        "persisted_on_server": persisted_flag,
         "updated_at_ms": int(row["updated_at_ms"]),
     }
 
@@ -651,6 +728,7 @@ def sync_offline_parcels(
                 if existing_ts > incoming_ts and existing_valid:
                     continue
 
+            hist_bundle = build_historical_parcel_snapshots(pid, repaired_coords)
             conn.execute(
                 """
                 INSERT INTO parcels (
@@ -658,8 +736,9 @@ def sync_offline_parcels(
                     area_hectares, eudr_status, ndvi_alert_level, mean_ndvi,
                     shade_tree_count, acahual_removal_post_2020,
                     has_verified_custf_permit, cumulative_dry_kg,
-                    is_topology_valid, coordinates_json, updated_at_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    is_topology_valid, coordinates_json,
+                    historical_snapshots_json, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(parcel_id) DO UPDATE SET
                     producer_id = excluded.producer_id,
                     producer_name = excluded.producer_name,
@@ -673,6 +752,10 @@ def sync_offline_parcels(
                     has_verified_custf_permit = excluded.has_verified_custf_permit,
                     is_topology_valid = excluded.is_topology_valid,
                     coordinates_json = excluded.coordinates_json,
+                    historical_snapshots_json = COALESCE(
+                        parcels.historical_snapshots_json,
+                        excluded.historical_snapshots_json
+                    ),
                     updated_at_ms = excluded.updated_at_ms
                 """,
                 (
@@ -690,6 +773,7 @@ def sync_offline_parcels(
                     float(incoming.get("cumulative_dry_kg", 0.0)),
                     1 if lint_report["is_topology_valid"] else 0,
                     json.dumps(repaired_coords),
+                    json.dumps(hist_bundle),
                     incoming_ts,
                 ),
             )
@@ -790,3 +874,77 @@ def record_persisted_reception(
             "delivered_dry_equivalent_kg": delivered_dry_equivalent_kg,
             "epcis_event": epcis_ev,
         }
+
+
+def get_or_create_parcel_historical_snapshots(
+    parcel_id: str, db_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """Return the persisted 7 historical snapshots centered on the parcel without recalculating."""
+    if is_supabase_rw_active(db_path):
+        try:
+            rows = _fetch_supabase_parcels(parcel_id=parcel_id)
+            if rows:
+                target = rows[0]
+                return {
+                    "parcel_id": target["parcel_id"],
+                    "storage_engine": "supabase_postgis",
+                    "persisted_on_server": True,
+                    "extent_bbox": target["extent_bbox"],
+                    "snapshots": target["historical_snapshots"],
+                }
+        except httpx.HTTPError:
+            pass
+
+    init_local_db(db_path)
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM parcels WHERE parcel_id = ?", (parcel_id,)
+        ).fetchone()
+        if not row:
+            raise ValueError(f"Parcela {parcel_id} no encontrada en base de datos.")
+        parcel = _row_to_parcel_dict(row)
+        if not parcel.get("persisted_on_server"):
+            hist_bundle = build_historical_parcel_snapshots(
+                parcel["parcel_id"], parcel["coordinates"]
+            )
+            conn.execute(
+                "UPDATE parcels SET historical_snapshots_json = ? WHERE parcel_id = ?",
+                (json.dumps(hist_bundle), parcel_id),
+            )
+            conn.commit()
+            snapshots = hist_bundle["snapshots"]
+            bbox = hist_bundle["extent_bbox"]
+        else:
+            snapshots = parcel["historical_snapshots"]
+            bbox = parcel["extent_bbox"]
+
+    return {
+        "parcel_id": parcel["parcel_id"],
+        "storage_engine": get_active_storage_engine(db_path),
+        "persisted_on_server": True,
+        "extent_bbox": bbox,
+        "snapshots": snapshots,
+    }
+
+
+def get_cached_parcel_map_image(
+    parcel_id: str,
+    period_key: str,
+    db_path: Optional[str] = None,
+    cache_dir: Optional[Path] = None,
+) -> bytes:
+    """Serve cached JPEG map centered on parcel, downloading only once if absent."""
+    manifest = get_or_create_parcel_historical_snapshots(parcel_id, db_path=db_path)
+    matching = next(
+        (s for s in manifest["snapshots"] if s["period_key"] == period_key), None
+    )
+    if not matching:
+        raise ValueError(f"Periodo {period_key} no encontrado para parcela {parcel_id}.")
+
+    return get_or_download_cached_parcel_map_bytes(
+        parcel_id=parcel_id,
+        period_key=period_key,
+        extent_bbox=matching["extent_bbox"],
+        months_ago=int(matching["months_ago"]),
+        cache_dir=cache_dir,
+    )
