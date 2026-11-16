@@ -145,6 +145,8 @@ def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) ->
         "hace_4_anios",
         "hace_5_anios",
     ]
+    releases = [item["wayback_release"] for item in bundle["snapshots"]]
+    assert len(set(releases)) == 7
     bbox = bundle["extent_bbox"]
     assert round((bbox[2] - bbox[0]) / (bbox[3] - bbox[1]), 2) == 1.75
     fitted = fit_bbox_to_aspect_ratio([-93.2275, 18.2085, -93.2185, 18.2175], 1.75)
@@ -152,7 +154,7 @@ def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) ->
 
     cache_dir = Path(tmp_path) / "map_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cached_file = cache_dir / "PAR-HIST-01_hace_5_anios.jpg"
+    cached_file = cache_dir / "PAR-HIST-01_hace_5_anios_26751.jpg"
     cached_file.write_bytes(b"JPEG_CACHED_BYTES_" * 12)
     served = get_or_download_cached_parcel_map_bytes(
         "PAR-HIST-01", "hace_5_anios", bbox, cache_dir=cache_dir
