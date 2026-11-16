@@ -1,7 +1,7 @@
 # AI-DLC Framework · Estado Actual Consolidado (`kanan-cacao-geo-engine`)
 
 **Repositorio:** `kanan-cacao-geo-engine` (FastAPI + Python Geoespacial + Planetary Computer / WMTS + Supabase)  
-**Última actualización:** `16/11/2026` · **Versión activa:** `v0.14.1` (`v12_s2_hpf_hd`)
+**Última actualización:** `16/11/2026` · **Versión activa:** `v0.14.2` (`v13_s2_pure_quality`)
 
 ---
 
@@ -18,7 +18,8 @@
 | Auditoría Multitemporal | `v0.13.1` | [`11-georef-loading-and-satellite-multitemporal-spec.md`](../../../kanan-cacao-web/docs/aidlc/11-georef-loading-and-satellite-multitemporal-spec.md) | Completado (`main`) | Diagnóstico matemático de multitemporalidad satelital en Comalcalco (`Test Terreno`) y reutilización de caché en servidor. |
 | **Estándar Sentinel-2** | `v0.13.2` | [`07-v10-sentinel2-standardization-spec.md`](./07-v10-sentinel2-standardization-spec.md) | Completado (`main`) | Estandarización soberana en **Copernicus Sentinel-2 L2A** (revisita 5 días, gratuito) + respaldo **Sentinel-2 Cloudless EOX ESA** y caché `v10_sentinel2_standard`. |
 | **Histórico Puro S2** | `v0.14.0` | [`08-v11-sentinel2-pure-historic-fix-spec.md`](./08-v11-sentinel2-pure-historic-fix-spec.md) | Completado (`main`) | URL versionada `s2v11_`, 0 colisiones entre horizontes (`7/7` fechas/escenas/MD5 únicos), alineación `render_zoom` 1x en Sentinel-2 puro, hidratación paralela y `/parcels/refresh-historical`. |
-| **Zoom Óptimo + S2 HD** | **`v0.14.1`** | [`09-v12-optimal-zoom-and-hpf-s2-hd-spec.md`](./09-v12-optimal-zoom-and-hpf-s2-hd-spec.md) | **Completado (`main`)** | Zoom dinámico proporcional por parcela (`fill_ratio = 0.58`, sin tope `15.65`, ej. `16.94` en *Test Terreno*) + inyección HPF de media cero en `1520×840` manteniendo 100 % la reflectancia fechada Sentinel-2 L2A (`s2v12_`). |
+| **Zoom Óptimo + S2 HD** | `v0.14.1` | [`09-v12-optimal-zoom-and-hpf-s2-hd-spec.md`](./09-v12-optimal-zoom-and-hpf-s2-hd-spec.md) | Completado (`main`) | Zoom dinámico proporcional por parcela (`fill_ratio = 0.58`) en `1520×840` (`s2v12_`). |
+| **Sentinel-2 Puro Calidad** | **`v0.14.2`** | [`10-v13-pure-sentinel2-quality-spec.md`](./10-v13-pure-sentinel2-quality-spec.md) | **Completado (`main`)** | Imágenes 100 % puras de **Copernicus Sentinel-2 L2A** sin filtros ni fusiones estáticas, alineación `rz_canvas = render_zoom + 1.0`, filtro anti-bruma (`min_rgb > 85`) y priorización `eo:cloud_cover <= 42 %` (`v13_s2_pure_quality` / `s2v13_`). |
 
 ---
 

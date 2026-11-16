@@ -49,7 +49,7 @@ DEFAULT_MAP_CACHE_DIR = Path(
 )
 MAX_CLOUD_COVER_PCT = 25.0
 MAX_PURE_WHITE_CLOUD_PCT = 4.0
-MAX_SHADOW_CLOUD_PCT = 8.0
+MAX_SHADOW_CLOUD_PCT = 13.5
 MAX_AVG_HAZE_PCT = 14.0
 MAX_TILE_HAZE_PCT = 18.0
 MAX_NODATA_OR_BLACK_PCT = 12.0
@@ -538,10 +538,18 @@ def compute_tile_cloud_metrics(tile_bytes: bytes) -> Dict[str, float]:
     black_pct = float((rgb.max(axis=2) < 5).mean() * 100.0)
     brightness = rgb.mean(axis=2)
     chroma = rgb.max(axis=2) - rgb.min(axis=2)
-    white_pct = float(((brightness > 180) & (chroma < 38)).mean() * 100.0)
+    min_rgb = rgb.min(axis=2)
+    white_pct = float(
+        (((brightness > 130) & (chroma < 42)) | (brightness > 160)).mean() * 100.0
+    )
     shadow_pct = float((brightness < 26).mean() * 100.0)
     haze_pct = float(
-        ((rgb[:, :, 2] >= rgb[:, :, 1] - 2) & (brightness > 95)).mean() * 100.0
+        (
+            ((rgb[:, :, 2] >= rgb[:, :, 1] - 2) & (brightness > 95))
+            | (min_rgb > 85)
+            | ((rgb[:, :, 1] > 110) & (rgb[:, :, 2] > 65))
+        ).mean()
+        * 100.0
     )
     return {
         "white_pct": round(white_pct, 2),
@@ -936,21 +944,16 @@ def _render_mpc_sentinel2_bicubic(
     view_w: int = VIEWPORT_W,
     view_h: int = VIEWPORT_H,
 ) -> Tuple[bytes, Dict[str, float], float]:
-    """Render Sentinel-2 L2A at variable optimal parcel zoom (HD 1520x840 with HPF)."""
+    """Render 100% pure Copernicus Sentinel-2 L2A at optimal parcel zoom without filters."""
     _, _, optimal_zoom = compute_optimal_parcel_zoom(
         coordinates, view_w=VIEWPORT_W, view_h=VIEWPORT_H
     )
-    render_zoom = round(optimal_zoom, 2)
-    if view_w >= HD_VIEWPORT_W:
-        try:
-            return _render_hd_sentinel2_hpf(coordinates, release, render_zoom)
-        except Exception:
-            pass
-
+    render_zoom = round(min(16.05, optimal_zoom), 2)
+    rz_canvas = round(render_zoom + (1.0 if view_w >= HD_VIEWPORT_W else 0.0), 2)
     rendered = _stitch_wmts_fractional_image(
         coordinates,
         release,
-        render_zoom=render_zoom,
+        render_zoom=rz_canvas,
         fetch_zoom=14,
         view_w=view_w,
         view_h=view_h,
@@ -1017,7 +1020,7 @@ def upload_parcel_map_to_supabase_storage(
 
     safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", parcel_id)
     safe_rel = re.sub(r"[^a-zA-Z0-9_-]", "_", wayback_release)
-    object_path = f"{safe_id}/s2v12_{period_key}_{safe_rel}.jpg"
+    object_path = f"{safe_id}/s2v13_{period_key}_{safe_rel}.jpg"
     upload_url = f"{supa_url}/storage/v1/object/{SUPABASE_MAP_BUCKET}/{object_path}"
     headers = {
         "apikey": supa_key,
@@ -1252,7 +1255,7 @@ def select_best_candidate_within_10_attempts(
         is_clear = (
             white_pct <= MAX_PURE_WHITE_CLOUD_PCT
             and shadow_pct <= MAX_SHADOW_CLOUD_PCT
-            and haze_pct <= MAX_TILE_HAZE_PCT
+            and haze_pct <= min(MAX_TILE_HAZE_PCT, 3.5)
             and nodata_pct < MAX_NODATA_OR_BLACK_PCT
             and black_pct < MAX_NODATA_OR_BLACK_PCT
         )
@@ -1303,9 +1306,9 @@ def _search_mpc_sentinel2_for_horizon(
     the first cloud-free image or the least-cloudy image among those 20 attempts.
     """
     end_dt = min(max_date, target_date)
-    start_dt = max(date(2017, 1, 1), end_dt - timedelta(days=150))
+    start_dt = max(date(2017, 1, 1), end_dt - timedelta(days=190))
     if end_dt < start_dt:
-        start_dt = max(date(2017, 1, 1), end_dt - timedelta(days=150))
+        start_dt = max(date(2017, 1, 1), end_dt - timedelta(days=190))
 
     bbox = [
         round(lng - 0.004, 6),
@@ -1321,8 +1324,8 @@ def _search_mpc_sentinel2_for_horizon(
                     "collections": ["sentinel-2-l2a"],
                     "bbox": bbox,
                     "datetime": f"{start_dt.isoformat()}T00:00:00Z/{end_dt.isoformat()}T23:59:59Z",
-                    "query": {"eo:cloud_cover": {"lt": 92}},
-                    "limit": 80,
+                    "query": {"eo:cloud_cover": {"lt": 85}},
+                    "limit": 90,
                 },
             )
             res.raise_for_status()
@@ -1352,7 +1355,15 @@ def _search_mpc_sentinel2_for_horizon(
         if prev is None or cloud_meta < prev[0]:
             best_granule_by_date[raw_dt] = (cloud_meta, cand)
 
-    ordered_dates = sorted(best_granule_by_date.keys(), reverse=True)
+    low_cloud_dates = sorted(
+        [d for d, (cc, _) in best_granule_by_date.items() if cc <= 42.0],
+        reverse=True,
+    )
+    high_cloud_dates = sorted(
+        [d for d, (cc, _) in best_granule_by_date.items() if cc > 42.0],
+        reverse=True,
+    )
+    ordered_dates = low_cloud_dates + high_cloud_dates
     candidates = [best_granule_by_date[d][1] for d in ordered_dates]
     if not candidates:
         return None
@@ -1389,7 +1400,7 @@ def _select_captures_with_days_margin(
     _, _, optimal_zoom = compute_optimal_parcel_zoom(
         coordinates, view_w=VIEWPORT_W, view_h=VIEWPORT_H
     )
-    s2_1x_zoom = round(optimal_zoom, 2)
+    s2_1x_zoom = round(min(16.05, optimal_zoom), 2)
 
     # Disjoint upper cutoffs prevent near horizons (e.g. 0m vs 6m) or duplicate years
     # from ever colliding on the same Sentinel-2 scene when evaluated in parallel.
@@ -1633,7 +1644,7 @@ def build_historical_parcel_snapshots(
                 rendered_sharpness = compute_image_sharpness(jpeg_bytes)
                 target_dir.mkdir(parents=True, exist_ok=True)
                 safe_rel = re.sub(r"[^a-zA-Z0-9_-]", "_", rel)
-                cache_file = target_dir / f"{safe_id}_s2v12_{period_key}_{safe_rel}.jpg"
+                cache_file = target_dir / f"{safe_id}_s2v13_{period_key}_{safe_rel}.jpg"
                 cache_file.write_bytes(jpeg_bytes)
                 cached_public_url = upload_parcel_map_to_supabase_storage(
                     parcel_id, period_key, rel, jpeg_bytes
@@ -1644,11 +1655,11 @@ def build_historical_parcel_snapshots(
         sensor_name = str(cap.get("sensor") or "Copernicus Sentinel-2 L2A")
         if rel.startswith("mpc:"):
             res_desc = (
-                "Copernicus Sentinel-2 L2A · Full HD 1520×840 (Zoom dinámico óptimo)"
+                "Copernicus Sentinel-2 L2A (10 m/px nativo · Sin filtros · Revisit 5 días)"
             )
         elif rel.startswith("s2cloudless-"):
             res_desc = (
-                "Copernicus Sentinel-2 Cloudless · Full HD 1520×840 (Zoom dinámico)"
+                "Copernicus Sentinel-2 Cloudless (10 m/px ESA · Sin filtros)"
             )
         else:
             res_desc = f"{sensor_name} (Respaldo offline)"
@@ -1671,7 +1682,7 @@ def build_historical_parcel_snapshots(
             "resolution_label": res_desc,
             "capture_source": "real_src_date",
             "pixel_cloud_checked": bool(probe_live),
-            "cloud_filter_version": "v12_s2_hpf_hd",
+            "cloud_filter_version": "v13_s2_pure_quality",
             "extent_bbox": extent_bbox,
             "direct_ortho_url": direct_url,
             "cached_image_url": cached_public_url,
@@ -1719,7 +1730,7 @@ def get_or_download_cached_parcel_map_bytes(
     target_dir.mkdir(parents=True, exist_ok=True)
     safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", parcel_id)
     safe_rel = re.sub(r"[^a-zA-Z0-9_-]", "_", resolved_release)
-    cache_file = target_dir / f"{safe_id}_s2v12_{period_key}_{safe_rel}.jpg"
+    cache_file = target_dir / f"{safe_id}_s2v13_{period_key}_{safe_rel}.jpg"
 
     if cache_file.exists() and cache_file.stat().st_size > 1000:
         return cache_file.read_bytes()
