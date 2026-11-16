@@ -2,7 +2,7 @@
 
 import calendar
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import io
 import math
@@ -30,6 +30,10 @@ ESRI_WAYBACK_WMTS_BASE_URL = (
     "World_Imagery/WMTS/1.0.0/default028mm/MapServer/tile"
 )
 EOX_S2_CLOUDLESS_WMTS_BASE_URL = "https://tiles.maps.eox.at/wmts/1.0.0"
+PLANETARY_COMPUTER_STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1/search"
+PLANETARY_COMPUTER_TILE_BASE = (
+    "https://planetarycomputer.microsoft.com/api/data/v1/item/tiles/WebMercatorQuad"
+)
 SUPABASE_MAP_BUCKET = "parcel-satellite-maps"
 
 DEFAULT_MAP_CACHE_DIR = Path(
@@ -42,6 +46,9 @@ MAX_CLOUD_COVER_PCT = 25.0
 MAX_PURE_WHITE_CLOUD_PCT = 12.0
 MAX_AVG_HAZE_PCT = 12.0
 MAX_TILE_HAZE_PCT = 20.0
+MAX_NODATA_OR_BLACK_PCT = 15.0
+MAX_WAYBACK_OFFSET_DAYS_CURRENT = 45
+MAX_WAYBACK_OFFSET_DAYS_HISTORICAL = 75
 VIEWPORT_W = 760
 VIEWPORT_H = 420
 TILE_SIZE = 256
@@ -374,8 +381,24 @@ def compute_centered_wayback_viewport(
     return center_lat, center_lng, 14
 
 
+def format_date_ddmmyyyy(iso_date: str) -> str:
+    """Format YYYY-MM-DD (or ISO timestamp) into producer-standard DD/MM/YYYY."""
+    clean = str(iso_date or "").strip()[:10]
+    parts = clean.split("-")
+    if len(parts) == 3 and all(p.isdigit() for p in parts):
+        return f"{parts[2]}/{parts[1]}/{parts[0]}"
+    return clean
+
+
 def resolve_wmts_tile_url(release: str, zoom: int, row: int, col: int) -> str:
-    """Resolve WMTS tile URL for Esri Wayback release or EU EOX Sentinel-2 Cloudless."""
+    """Resolve WMTS tile URL for Planetary Computer Sentinel-2, EOX, or Esri Wayback."""
+    if release.startswith("mpc:"):
+        item_id = urllib.parse.quote(release[4:], safe="")
+        return (
+            f"{PLANETARY_COMPUTER_TILE_BASE}/{zoom}/{col}/{row}.png"
+            f"?collection=sentinel-2-l2a&item={item_id}"
+            "&assets=visual&asset_bidx=visual%7C1,2,3"
+        )
     if release.startswith("s2cloudless-"):
         return f"{EOX_S2_CLOUDLESS_WMTS_BASE_URL}/{release}/default/g/{zoom}/{row}/{col}.jpg"
     return f"{ESRI_WAYBACK_WMTS_BASE_URL}/{release}/16/{row}/{col}" if zoom == 16 else (
@@ -384,24 +407,29 @@ def resolve_wmts_tile_url(release: str, zoom: int, row: int, col: int) -> str:
 
 
 def compute_tile_cloud_metrics(tile_bytes: bytes) -> Dict[str, float]:
-    """Inspect decoded RGB pixels for bright white clouds and pale atmospheric haze."""
+    """Inspect decoded RGBA pixels for white clouds, haze, transparent nodata, and black edges."""
     if len(tile_bytes) < 500:
-        return {"white_pct": 100.0, "haze_pct": 100.0}
+        return {"white_pct": 100.0, "haze_pct": 100.0, "nodata_pct": 100.0, "black_pct": 100.0}
     try:
-        im = Image.open(io.BytesIO(tile_bytes)).convert("RGB")
+        im = Image.open(io.BytesIO(tile_bytes)).convert("RGBA")
         arr = np.asarray(im, dtype=np.int16)
     except Exception:
-        return {"white_pct": 0.0, "haze_pct": 0.0}
+        return {"white_pct": 0.0, "haze_pct": 0.0, "nodata_pct": 0.0, "black_pct": 0.0}
 
-    brightness = arr.mean(axis=2)
-    chroma = arr.max(axis=2) - arr.min(axis=2)
+    rgb = arr[:, :, :3]
+    nodata_pct = float((arr[:, :, 3] == 0).mean() * 100.0)
+    black_pct = float((rgb.max(axis=2) < 5).mean() * 100.0)
+    brightness = rgb.mean(axis=2)
+    chroma = rgb.max(axis=2) - rgb.min(axis=2)
     white_pct = float(((brightness > 212) & (chroma < 25)).mean() * 100.0)
     haze_pct = float(
-        ((arr[:, :, 2] >= arr[:, :, 1] - 2) & (brightness > 95)).mean() * 100.0
+        ((rgb[:, :, 2] >= rgb[:, :, 1] - 2) & (brightness > 95)).mean() * 100.0
     )
     return {
         "white_pct": round(white_pct, 2),
         "haze_pct": round(haze_pct, 2),
+        "nodata_pct": round(nodata_pct, 2),
+        "black_pct": round(black_pct, 2),
     }
 
 
@@ -410,7 +438,7 @@ def is_capture_cloudy(
     tile_bytes: Optional[bytes] = None,
     viewport_tiles: Optional[List[bytes]] = None,
 ) -> bool:
-    """Reject captures covered by clouds via metadata or pixel white/haze inspection."""
+    """Reject captures with clouds, dense haze, or black/empty orbital nodata seams."""
     if cloud_cover_pct is not None and cloud_cover_pct > MAX_CLOUD_COVER_PCT:
         return True
     if tile_bytes is not None and len(tile_bytes) < 2800:
@@ -429,10 +457,14 @@ def is_capture_cloudy(
     avg_white = sum(m["white_pct"] for m in metrics) / len(metrics)
     avg_haze = sum(m["haze_pct"] for m in metrics) / len(metrics)
     max_haze = max(m["haze_pct"] for m in metrics)
+    avg_nodata = sum(m.get("nodata_pct", 0.0) for m in metrics) / len(metrics)
+    avg_black = sum(m.get("black_pct", 0.0) for m in metrics) / len(metrics)
     return (
         avg_white >= MAX_PURE_WHITE_CLOUD_PCT
         or avg_haze >= MAX_AVG_HAZE_PCT
         or max_haze >= MAX_TILE_HAZE_PCT
+        or avg_nodata >= MAX_NODATA_OR_BLACK_PCT
+        or avg_black >= MAX_NODATA_OR_BLACK_PCT
     )
 
 
@@ -465,7 +497,7 @@ def _fetch_viewport_tile_grid(
         tx, ty = tx_ty
         tile_url = resolve_wmts_tile_url(release, zoom, ty, tx)
         try:
-            with httpx.Client(timeout=6.0, follow_redirects=True) as client:
+            with httpx.Client(timeout=12.0, follow_redirects=True) as client:
                 res = client.get(tile_url, headers={"User-Agent": "KananCacaoGeoEngine/1.0"})
                 if res.status_code == 200:
                     return (tx, ty), res.content
@@ -735,6 +767,152 @@ def _discover_real_captures_for_point(
     return verified
 
 
+def _search_mpc_sentinel2_for_horizon(
+    lat: float,
+    lng: float,
+    coordinates: List[List[float]],
+    target_date: date,
+    max_date: date,
+    used_dates: set[str],
+    used_releases: set[str],
+) -> Optional[Dict[str, Any]]:
+    """Query Planetary Computer Sentinel-2 L2A around target_date and verify pixel cloudlessness."""
+    start_dt = max(date(2016, 1, 1), target_date - timedelta(days=120))
+    end_dt = min(max_date, target_date + timedelta(days=35))
+    if end_dt < start_dt:
+        start_dt = max(date(2016, 1, 1), end_dt - timedelta(days=120))
+
+    bbox = [round(lng - 0.004, 6), round(lat - 0.0025, 6),
+            round(lng + 0.004, 6), round(lat + 0.0025, 6)]
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            res = client.post(
+                PLANETARY_COMPUTER_STAC_URL,
+                json={
+                    "collections": ["sentinel-2-l2a"],
+                    "bbox": bbox,
+                    "datetime": f"{start_dt.isoformat()}T00:00:00Z/{end_dt.isoformat()}T23:59:59Z",
+                    "query": {"eo:cloud_cover": {"lt": 30}},
+                    "limit": 14,
+                },
+            )
+            res.raise_for_status()
+            feats = res.json().get("features", [])
+    except Exception:
+        return None
+
+    candidates: List[Tuple[Tuple[int, int, float], Dict[str, Any]]] = []
+    seen_dates_in_window: set[str] = set()
+    for feat in feats:
+        raw_dt = str(feat.get("properties", {}).get("datetime") or "")[:10]
+        if len(raw_dt) != 10:
+            continue
+        item_id = str(feat.get("id") or "")
+        release_key = f"mpc:{item_id}"
+        if raw_dt in used_dates or release_key in used_releases or raw_dt in seen_dates_in_window:
+            continue
+        scene_date = date.fromisoformat(raw_dt)
+        delta_days = abs((scene_date - target_date).days)
+        is_future_tie = 1 if scene_date > target_date else 0
+        cloud_meta = float(feat.get("properties", {}).get("eo:cloud_cover") or 0.0)
+        seen_dates_in_window.add(raw_dt)
+        candidates.append((
+            (delta_days, is_future_tie, cloud_meta),
+            {
+                "capture_date": raw_dt,
+                "wayback_release": release_key,
+                "cloud_cover_pct": cloud_meta,
+                "sensor": "Copernicus Sentinel-2 L2A",
+            },
+        ))
+
+    candidates.sort(key=lambda item: item[0])
+    for _, cand in candidates[:6]:
+        _, _, _, _, _, _, _, tile_map = _fetch_viewport_tile_grid(
+            coordinates, cand["wayback_release"], view_w=VIEWPORT_W, view_h=VIEWPORT_H
+        )
+        tiles_list = list(tile_map.values())
+        if not tiles_list:
+            continue
+        if not is_capture_cloudy(cand["cloud_cover_pct"], viewport_tiles=tiles_list):
+            return cand
+    return None
+
+
+def _match_hybrid_captures_for_horizons(
+    lat: float,
+    lng: float,
+    coordinates: List[List[float]],
+    anchor_dt: datetime,
+    wayback_captures: List[Dict[str, Any]],
+) -> List[Tuple[str, str, int, Dict[str, Any]]]:
+    """
+    Pick high-res Esri Wayback when within strict date tolerance of target horizon,
+    otherwise resolve closest pixel-clear Copernicus Sentinel-2 L2A capture for that exact window.
+    """
+    clean_wb = [
+        c for c in wayback_captures
+        if not is_capture_cloudy(c.get("cloud_cover_pct"))
+        and not str(c.get("wayback_release", "")).startswith("s2cloudless-")
+    ]
+    anchor_date = anchor_dt.date()
+    used_dates: set[str] = set()
+    used_releases: set[str] = set()
+    assigned: List[Tuple[str, str, int, Dict[str, Any]]] = []
+
+    for period_key, label, months_ago in TARGET_HORIZON_SPECS:
+        target_dt = _subtract_months(anchor_dt, months_ago) if months_ago > 0 else anchor_dt
+        target_date = target_dt.date()
+        max_allowed = anchor_date if months_ago == 0 else min(
+            anchor_date, target_date + timedelta(days=35)
+        )
+        max_offset = (
+            MAX_WAYBACK_OFFSET_DAYS_CURRENT
+            if months_ago == 0
+            else MAX_WAYBACK_OFFSET_DAYS_HISTORICAL
+        )
+
+        wb_in_window = [
+            c for c in clean_wb
+            if c["capture_date"] not in used_dates
+            and c["wayback_release"] not in used_releases
+            and date.fromisoformat(c["capture_date"]) <= max_allowed
+            and abs((date.fromisoformat(c["capture_date"]) - target_date).days) <= max_offset
+        ]
+        chosen: Optional[Dict[str, Any]] = None
+        if wb_in_window:
+            chosen = min(
+                wb_in_window,
+                key=lambda x: abs((date.fromisoformat(x["capture_date"]) - target_date).days),
+            )
+        else:
+            chosen = _search_mpc_sentinel2_for_horizon(
+                lat=lat,
+                lng=lng,
+                coordinates=coordinates,
+                target_date=target_date,
+                max_date=max_allowed,
+                used_dates=used_dates,
+                used_releases=used_releases,
+            )
+
+        if chosen is None:
+            fallback_pool = [
+                c for c in clean_wb
+                if c["capture_date"] not in used_dates and c["wayback_release"] not in used_releases
+            ] or clean_wb[:1]
+            chosen = min(
+                fallback_pool,
+                key=lambda x: abs((date.fromisoformat(x["capture_date"]) - target_date).days),
+            )
+
+        used_dates.add(chosen["capture_date"])
+        used_releases.add(chosen["wayback_release"])
+        assigned.append((period_key, label, months_ago, chosen))
+
+    return assigned
+
+
 def assign_distinct_captures_to_horizons(
     captures: List[Dict[str, Any]],
     anchor_dt: datetime,
@@ -821,12 +999,17 @@ def build_historical_parcel_snapshots(
 
     anchor = _parse_anchor_datetime(reference_date_iso or registered_at_iso)
 
-    captures = (
-        _discover_real_captures_for_point(center_lat, center_lng, coordinates=ring)
-        if probe_live
-        else list(VERIFIED_TABASCO_CAPTURES)
-    )
-    matched = assign_distinct_captures_to_horizons(captures, anchor)
+    if probe_live:
+        wb_captures = _discover_real_captures_for_point(
+            center_lat, center_lng, coordinates=ring
+        )
+        matched = _match_hybrid_captures_for_horizons(
+            center_lat, center_lng, ring, anchor, wb_captures
+        )
+    else:
+        matched = assign_distinct_captures_to_horizons(
+            list(VERIFIED_TABASCO_CAPTURES), anchor
+        )
 
     snapshots: List[Dict[str, Any]] = []
     target_dir = cache_dir or DEFAULT_MAP_CACHE_DIR
@@ -836,6 +1019,7 @@ def build_historical_parcel_snapshots(
         period_key, label, months_ago, cap = item
         rel = cap["wayback_release"]
         real_date = cap["capture_date"]
+        formatted_date = format_date_ddmmyyyy(real_date)
         direct_url = resolve_wmts_tile_url(rel, vp_zoom, row, col)
         cached_public_url: Optional[str] = None
 
@@ -854,14 +1038,14 @@ def build_historical_parcel_snapshots(
 
         return {
             "period_key": period_key,
-            "label": f"{label} ({real_date})",
+            "label": f"{label} ({formatted_date})",
             "months_ago": months_ago,
             "wayback_release": rel,
             "captured_date_iso": real_date,
             "cloud_cover_pct": cap.get("cloud_cover_pct", 0.0),
             "capture_source": "real_src_date",
             "pixel_cloud_checked": bool(probe_live),
-            "cloud_filter_version": "v2",
+            "cloud_filter_version": "v3_date_aligned",
             "extent_bbox": extent_bbox,
             "direct_ortho_url": direct_url,
             "cached_image_url": cached_public_url,
