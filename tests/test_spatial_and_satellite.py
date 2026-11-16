@@ -289,3 +289,20 @@ def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) ->
     assert clear_pick["capture_date"] == "2026-05-11"
     assert clear_pick["cloud_attempts_used"] == 15
     assert clear_pick["cloud_fallback_least_cloudy"] is False
+
+    from app.services.satellite_audit_engine import compute_optimal_parcel_zoom
+
+    tiny_parcel = [
+        [-93.3910, 18.0340], [-93.3905, 18.0340], [-93.3905, 18.0335], [-93.3910, 18.0335],
+    ]
+    medium_parcel = [
+        [-93.3920, 18.0350], [-93.3900, 18.0350], [-93.3900, 18.0330], [-93.3920, 18.0330],
+    ]
+    large_parcel = [
+        [-93.3980, 18.0400], [-93.3850, 18.0400], [-93.3850, 18.0280], [-93.3980, 18.0280],
+    ]
+    c_lat_t, c_lng_t, z_tiny = compute_optimal_parcel_zoom(tiny_parcel)
+    _, _, z_med = compute_optimal_parcel_zoom(medium_parcel)
+    _, _, z_large = compute_optimal_parcel_zoom(large_parcel)
+    assert z_tiny > z_med > z_large
+    assert abs(c_lat_t - 18.03375) < 1e-6 and abs(c_lng_t - (-93.39075)) < 1e-6
