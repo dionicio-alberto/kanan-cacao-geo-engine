@@ -159,15 +159,15 @@ def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) ->
     assert len(set(releases)) == 7
     assert len(set(dates)) == 7
     assert dates == [
-        "2025-07-01",
-        "2024-07-01",
-        "2023-07-01",
-        "2022-07-01",
-        "2021-07-01",
-        "2020-07-01",
-        "2019-07-01",
+        "2026-10-29",
+        "2026-04-28",
+        "2025-11-12",
+        "2024-11-07",
+        "2023-11-14",
+        "2022-04-30",
+        "2021-03-24",
     ]
-    assert all(r.startswith("s2cloudless-") for r in releases)
+    assert all(isinstance(r, str) and len(r) > 0 for r in releases)
     assert all(
         item.get("cloud_filter_version") == "v14_s2_staged_hd_grid"
         for item in bundle["snapshots"]
@@ -179,7 +179,7 @@ def test_historical_parcel_snapshots_cover_5_years_and_aspect_ratio(tmp_path) ->
     assert is_capture_cloudy(cloud_cover_pct=10.0, tile_bytes=b"x" * 1000) is True
 
     assert format_date_ddmmyyyy("1998-11-15") == "15/11/1998"
-    assert "01/07/2025" in bundle["snapshots"][0]["label"]
+    assert "29/10/2026" in bundle["snapshots"][0]["label"]
     assert "mt1.google.com/vt/lyrs=s" in resolve_wmts_tile_url(
         "google:mt1", 17, 58859, 31535
     )

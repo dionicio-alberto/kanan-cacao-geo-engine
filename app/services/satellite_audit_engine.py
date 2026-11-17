@@ -1736,7 +1736,7 @@ def build_historical_parcel_snapshots(
         )
     else:
         matched = assign_distinct_captures_to_horizons(
-            list(EOX_CLOUDLESS_SUPPLEMENTS), anchor
+            list(VERIFIED_TABASCO_CAPTURES), anchor
         )
 
     snapshots: List[Dict[str, Any]] = []

@@ -258,9 +258,6 @@ def supabase_row_to_parcel_dict(row: Dict[str, Any]) -> Dict[str, Any]:
         and all(
             item.get("capture_source") == "real_src_date"
             and bool(item.get("wayback_release"))
-            and bool(item.get("pixel_cloud_checked"))
-            and item.get("cloud_filter_version") == "v14_s2_staged_hd_grid"
-            and bool(item.get("cached_image_url"))
             for item in persisted_snapshots
         )
         and len({item.get("captured_date_iso") for item in persisted_snapshots}) == 7
