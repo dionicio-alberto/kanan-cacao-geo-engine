@@ -1,14 +1,18 @@
 name: Kanan Cacao Geo-Engine CI/CD Pipeline
 
 on:
-  push:
-    branches:
-      - main
-      - develop
   pull_request:
     branches:
       - main
       - develop
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - '.vscode/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
