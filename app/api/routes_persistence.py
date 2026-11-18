@@ -6,14 +6,17 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from app.services.admin_roles_engine import verify_admin_requester
 from app.services.local_persistence_engine import (
+    create_field_logbook_entry,
     delete_parcel_record,
     get_active_storage_engine,
     get_cached_parcel_map_image,
     get_or_create_parcel_historical_snapshots,
     get_parcel_document_file,
+    list_field_logbook_entries,
     list_parcel_documents,
     list_persisted_parcels,
     record_persisted_reception,
+    sync_field_logbook_entries,
     sync_offline_parcels,
     toggle_parcel_custf,
     update_parcel_metadata,
@@ -250,3 +253,83 @@ def refresh_historical_snapshots_endpoint() -> Dict[str, Any]:
             }
         ),
     }
+
+
+class FieldLogbookEntryRequest(BaseModel):
+    id: Optional[str] = None
+    parcel_id: Optional[str] = None
+    parcelId: Optional[str] = None
+    parcel_name: Optional[str] = None
+    parcelName: Optional[str] = None
+    producer_id: Optional[str] = None
+    producerId: Optional[str] = None
+    producer_name: Optional[str] = None
+    producerName: Optional[str] = None
+    activity_type: Optional[str] = None
+    activityType: Optional[str] = None
+    activity_label: Optional[str] = None
+    activityLabel: Optional[str] = None
+    performed_date: Optional[str] = None
+    performedDate: Optional[str] = None
+    fertilization_date: Optional[str] = None
+    fertilizationDate: Optional[str] = None
+    expected_harvest_date: Optional[str] = None
+    expectedHarvestDate: Optional[str] = None
+    input_used: Optional[str] = None
+    inputUsed: Optional[str] = None
+    notes: str = ""
+    photos: List[Any] = Field(default_factory=list)
+    created_at_iso: Optional[str] = None
+    createdAtIso: Optional[str] = None
+    updated_at_ms: Optional[int] = None
+
+
+class FieldLogbookSyncRequest(BaseModel):
+    last_pulled_at_ms: Optional[int] = None
+    pushed_entries: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+@router.get("/logbook")
+def get_logbook_endpoint(
+    parcel_id: Optional[str] = None,
+    producer_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> Dict[str, Any]:
+    entries = list_field_logbook_entries(
+        parcel_id=parcel_id,
+        producer_id=producer_id,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    return {
+        "status": "OK",
+        "count": len(entries),
+        "entries": entries,
+    }
+
+
+@router.post("/logbook")
+def create_logbook_endpoint(payload: FieldLogbookEntryRequest) -> Dict[str, Any]:
+    try:
+        raw_dict = (
+            payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+        )
+        entry = create_field_logbook_entry(raw_dict)
+        return {
+            "status": "CREATED",
+            "entry": entry,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/logbook/sync")
+def sync_logbook_endpoint(payload: FieldLogbookSyncRequest) -> Dict[str, Any]:
+    try:
+        return sync_field_logbook_entries(
+            pushed_entries=payload.pushed_entries,
+            last_pulled_at_ms=payload.last_pulled_at_ms,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -40,6 +40,64 @@ DOCUMENT_TYPE_LABELS: Dict[str, str] = {
     "CUSTF_SEMARNAT": "Constancia ambiental y permiso de limpieza",
 }
 
+SEED_FIELD_LOGS: List[Dict[str, Any]] = [
+    {
+        "id": "LOG-INICIAL-01",
+        "parcel_id": "PAR-CHONTALPA-01",
+        "parcel_name": "Finca La Chontalpa Lote 1",
+        "producer_id": "PROD-MATEO-01",
+        "producer_name": "Don Mateo Hernández (Comalcalco)",
+        "activity_type": "FERTILIZACION",
+        "activity_label": "Fertilización y abono orgánico",
+        "performed_date": "2026-10-18",
+        "fertilization_date": "2026-10-18",
+        "expected_harvest_date": "2026-11-28",
+        "input_used": "Composta de cáscara de cacao + micorrizas (120 kg)",
+        "notes": (
+            "Aplicación de abono orgánico alrededor del cajete en 280 árboles de cacao "
+            "criollo tras lluvias ligeras."
+        ),
+        "photos": [
+            {
+                "id": "FOTO-DEMO-01",
+                "fileName": "fertilizacion_organica_lote_norte.svg",
+                "previewDataUrl": (
+                    "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' "
+                    "width='320' height='200' viewBox='0 0 320 200'>"
+                    "<rect width='320' height='200' fill='%231E5E36'/>"
+                    "<circle cx='160' cy='88' r='46' fill='%234ADE80' opacity='0.75'/>"
+                    "<rect x='150' y='105' width='20' height='65' fill='%2352321B'/>"
+                    "<text x='160' y='185' font-family='sans-serif' font-size='13' "
+                    "fill='%23FFFFFF' text-anchor='middle'>Abono aplicado en cacaotal</text></svg>"
+                ),
+                "capturedAtIso": "2026-10-18T09:40:00Z",
+            }
+        ],
+        "created_at_iso": "2026-10-18T15:10:00Z",
+        "updated_at_ms": 1792336200000,
+    },
+    {
+        "id": "LOG-INICIAL-02",
+        "parcel_id": "PAR-CHONTALPA-02",
+        "parcel_name": "Parcela El Cacao Sagrado",
+        "producer_id": "PROD-LUCIA-02",
+        "producer_name": "Doña Lucía Méndez (Cunduacán)",
+        "activity_type": "PODA",
+        "activity_label": "Poda de formación y sombra",
+        "performed_date": "2026-10-25",
+        "fertilization_date": None,
+        "expected_harvest_date": None,
+        "input_used": "Tijeras telescópicas y pasta bordelesa cicatrizante",
+        "notes": (
+            "Poda fitosanitaria de ramas secas y deschuponado para mejorar la aireación "
+            "y mitigar foco de monilia."
+        ),
+        "photos": [],
+        "created_at_iso": "2026-10-25T11:20:00Z",
+        "updated_at_ms": 1792927200000,
+    },
+]
+
 PARCEL_SELECT_FIELDS = (
     "id,producer_id,parcel_name,municipality,area_hectares,geojson_payload,"
     "eudr_status,acahual_removal_post_2020,captured_at,created_at,updated_at,"
@@ -701,6 +759,57 @@ def init_local_db(db_path: Optional[str] = None) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS field_logbook_entries (
+                id TEXT PRIMARY KEY,
+                parcel_id TEXT NOT NULL,
+                parcel_name TEXT NOT NULL,
+                producer_id TEXT,
+                producer_name TEXT,
+                activity_type TEXT NOT NULL,
+                activity_label TEXT NOT NULL,
+                performed_date TEXT NOT NULL,
+                fertilization_date TEXT,
+                expected_harvest_date TEXT,
+                input_used TEXT,
+                notes TEXT NOT NULL,
+                photos_json TEXT NOT NULL DEFAULT '[]',
+                created_at_iso TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            )
+            """
+        )
+        log_count = conn.execute("SELECT COUNT(*) FROM field_logbook_entries").fetchone()[0]
+        if log_count == 0:
+            for log_item in SEED_FIELD_LOGS:
+                conn.execute(
+                    """
+                    INSERT INTO field_logbook_entries (
+                        id, parcel_id, parcel_name, producer_id, producer_name,
+                        activity_type, activity_label, performed_date, fertilization_date,
+                        expected_harvest_date, input_used, notes, photos_json,
+                        created_at_iso, updated_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        log_item["id"],
+                        log_item["parcel_id"],
+                        log_item["parcel_name"],
+                        log_item.get("producer_id"),
+                        log_item.get("producer_name"),
+                        log_item["activity_type"],
+                        log_item["activity_label"],
+                        log_item["performed_date"],
+                        log_item.get("fertilization_date"),
+                        log_item.get("expected_harvest_date"),
+                        log_item.get("input_used"),
+                        log_item["notes"],
+                        json.dumps(log_item.get("photos", [])),
+                        log_item["created_at_iso"],
+                        log_item["updated_at_ms"],
+                    ),
+                )
         for extra_col in (
             "ALTER TABLE parcels ADD COLUMN registered_at_iso TEXT",
             "ALTER TABLE parcels ADD COLUMN historical_snapshots_json TEXT",
@@ -1687,3 +1796,209 @@ def delete_parcel_record(parcel_id: str, db_path: Optional[str] = None) -> bool:
         conn.execute("DELETE FROM parcels WHERE parcel_id = ?", (parcel_id,))
         conn.commit()
         return True
+
+
+def _row_to_field_log_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    photos = []
+    if "photos_json" in row.keys() and row["photos_json"]:
+        try:
+            photos = json.loads(row["photos_json"])
+        except Exception:
+            photos = []
+    return {
+        "id": row["id"],
+        "parcel_id": row["parcel_id"],
+        "parcel_name": row["parcel_name"],
+        "producer_id": row["producer_id"] if "producer_id" in row.keys() else None,
+        "producer_name": row["producer_name"] if "producer_name" in row.keys() else None,
+        "activity_type": row["activity_type"],
+        "activity_label": row["activity_label"],
+        "performed_date": row["performed_date"],
+        "fertilization_date": (
+            row["fertilization_date"] if "fertilization_date" in row.keys() else None
+        ),
+        "expected_harvest_date": (
+            row["expected_harvest_date"] if "expected_harvest_date" in row.keys() else None
+        ),
+        "input_used": row["input_used"] if "input_used" in row.keys() else None,
+        "notes": row["notes"],
+        "photos": photos,
+        "created_at_iso": row["created_at_iso"],
+        "updated_at_ms": row["updated_at_ms"],
+    }
+
+
+def list_field_logbook_entries(
+    parcel_id: Optional[str] = None,
+    producer_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """List logbook entries with optional filtering by parcel, producer, and date range."""
+    init_local_db(db_path)
+    with _connect(db_path) as conn:
+        query = "SELECT * FROM field_logbook_entries WHERE 1=1"
+        params: List[Any] = []
+        if parcel_id:
+            query += " AND parcel_id = ?"
+            params.append(parcel_id)
+        if producer_id:
+            query += " AND (producer_id = ? OR producer_name LIKE ?)"
+            params.extend([producer_id, f"%{producer_id}%"])
+        if start_date:
+            query += " AND performed_date >= ?"
+            params.append(start_date)
+        if end_date:
+            query += " AND performed_date <= ?"
+            params.append(end_date)
+        query += " ORDER BY performed_date DESC, updated_at_ms DESC"
+        rows = conn.execute(query, params).fetchall()
+        return [_row_to_field_log_dict(r) for r in rows]
+
+
+def create_field_logbook_entry(
+    entry_dict: Dict[str, Any],
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create or upsert a field logbook entry."""
+    init_local_db(db_path)
+    entry_id = entry_dict.get("id") or f"LOG-{int(time.time()*1000)}-{uuid.uuid4().hex[:6]}"
+    parcel_id = entry_dict.get("parcel_id") or entry_dict.get("parcelId")
+    if not parcel_id:
+        raise ValueError("parcel_id es obligatorio para registrar en bitácora.")
+
+    parcel_name = entry_dict.get("parcel_name") or entry_dict.get("parcelName") or parcel_id
+    producer_id = entry_dict.get("producer_id") or entry_dict.get("producerId")
+    producer_name = entry_dict.get("producer_name") or entry_dict.get("producerName")
+
+    with _connect(db_path) as conn:
+        p_row = conn.execute(
+            "SELECT parcel_name, producer_id, producer_name FROM parcels WHERE parcel_id = ?",
+            (parcel_id,),
+        ).fetchone()
+        if p_row:
+            if not producer_id:
+                producer_id = p_row["producer_id"]
+            if not producer_name:
+                producer_name = p_row["producer_name"]
+            if parcel_name == parcel_id and p_row["parcel_name"]:
+                parcel_name = p_row["parcel_name"]
+
+    activity_type = (
+        entry_dict.get("activity_type") or entry_dict.get("activityType") or "OTRO"
+    )
+    activity_label = (
+        entry_dict.get("activity_label") or entry_dict.get("activityLabel") or activity_type
+    )
+    performed_date = (
+        entry_dict.get("performed_date")
+        or entry_dict.get("performedDate")
+        or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    )
+    fertilization_date = (
+        entry_dict.get("fertilization_date") or entry_dict.get("fertilizationDate")
+    )
+    expected_harvest_date = (
+        entry_dict.get("expected_harvest_date") or entry_dict.get("expectedHarvestDate")
+    )
+    input_used = entry_dict.get("input_used") or entry_dict.get("inputUsed")
+    notes = entry_dict.get("notes") or ""
+    photos = entry_dict.get("photos") or []
+    photos_json = json.dumps(photos) if isinstance(photos, list) else str(photos)
+    created_at_iso = (
+        entry_dict.get("created_at_iso")
+        or entry_dict.get("createdAtIso")
+        or datetime.now(timezone.utc).isoformat()
+    )
+    updated_at_ms = int(entry_dict.get("updated_at_ms") or (time.time() * 1000))
+
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO field_logbook_entries (
+                id, parcel_id, parcel_name, producer_id, producer_name,
+                activity_type, activity_label, performed_date, fertilization_date,
+                expected_harvest_date, input_used, notes, photos_json,
+                created_at_iso, updated_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                parcel_id = excluded.parcel_id,
+                parcel_name = excluded.parcel_name,
+                producer_id = excluded.producer_id,
+                producer_name = excluded.producer_name,
+                activity_type = excluded.activity_type,
+                activity_label = excluded.activity_label,
+                performed_date = excluded.performed_date,
+                fertilization_date = excluded.fertilization_date,
+                expected_harvest_date = excluded.expected_harvest_date,
+                input_used = excluded.input_used,
+                notes = excluded.notes,
+                photos_json = excluded.photos_json,
+                updated_at_ms = excluded.updated_at_ms
+            """,
+            (
+                entry_id,
+                parcel_id,
+                parcel_name,
+                producer_id,
+                producer_name,
+                activity_type,
+                activity_label,
+                performed_date,
+                fertilization_date,
+                expected_harvest_date,
+                input_used,
+                notes,
+                photos_json,
+                created_at_iso,
+                updated_at_ms,
+            ),
+        )
+        conn.commit()
+
+    return {
+        "id": entry_id,
+        "parcel_id": parcel_id,
+        "parcel_name": parcel_name,
+        "producer_id": producer_id,
+        "producer_name": producer_name,
+        "activity_type": activity_type,
+        "activity_label": activity_label,
+        "performed_date": performed_date,
+        "fertilization_date": fertilization_date,
+        "expected_harvest_date": expected_harvest_date,
+        "input_used": input_used,
+        "notes": notes,
+        "photos": photos if isinstance(photos, list) else [],
+        "created_at_iso": created_at_iso,
+        "updated_at_ms": updated_at_ms,
+    }
+
+
+def sync_field_logbook_entries(
+    pushed_entries: List[Dict[str, Any]],
+    last_pulled_at_ms: Optional[int] = None,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Sync offline field logbook entries and return updated entries."""
+    accepted_ids = []
+    for entry in pushed_entries:
+        saved = create_field_logbook_entry(entry, db_path=db_path)
+        accepted_ids.append(saved["id"])
+
+    all_entries = list_field_logbook_entries(db_path=db_path)
+    if last_pulled_at_ms is not None:
+        remote_entries = [
+            e for e in all_entries if e["updated_at_ms"] > last_pulled_at_ms
+        ]
+    else:
+        remote_entries = all_entries
+
+    return {
+        "status": "SYNCED",
+        "accepted_ids": accepted_ids,
+        "synced_count": len(accepted_ids),
+        "remote_entries": remote_entries,
+        "server_time_ms": int(time.time() * 1000),
+    }
