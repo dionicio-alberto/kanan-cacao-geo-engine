@@ -98,6 +98,185 @@ SEED_FIELD_LOGS: List[Dict[str, Any]] = [
     },
 ]
 
+DEFAULT_LOGBOOK_CONFIG: Dict[str, Any] = {
+    "id": "global_config",
+    "version": 1,
+    "enable_photos": 1,
+    "enable_inputs_used": 1,
+    "enable_doses": 1,
+    "enable_labor_and_costs": 1,
+    "enable_weather_conditions": 1,
+    "enable_satellite_comparison": 1,
+    "enable_eudr_flags": 1,
+    "enable_custom_fields": 1,
+    "allow_producer_custom_tags": 1,
+    "min_required_photos": 0,
+    "updated_at_iso": "2026-11-18T00:00:00Z",
+    "updated_by": "sistema_astra",
+}
+
+DEFAULT_LOGBOOK_ACTIVITIES: List[Dict[str, Any]] = [
+    {
+        "activity_key": "MANEJO_SOMBRA",
+        "name": "Manejo de Sombra y Poda Forestal",
+        "category": "AGROFORESTERIA",
+        "icon": "🌳",
+        "description": "Regulación de luz solar mediante poda de árboles de sombra (guamo, cedro, macuilí) para prevenir exceso de humedad.",
+        "default_fields_json": json.dumps(["labor_hours", "workers_count"]),
+        "requires_inputs": 0,
+        "requires_dose": 0,
+        "is_active": 1,
+        "is_archived": 0,
+        "sort_order": 1,
+    },
+    {
+        "activity_key": "PODA_CACAO",
+        "name": "Poda de Cacao (Formación / Mantenimiento / Fitosanitaria)",
+        "category": "MANEJO_CULTIVO",
+        "icon": "✂️",
+        "description": "Eliminación de chupones, ramas bajeras, enfermas o secas para facilitar aireación y floración.",
+        "default_fields_json": json.dumps(["labor_hours", "workers_count"]),
+        "requires_inputs": 0,
+        "requires_dose": 0,
+        "is_active": 1,
+        "is_archived": 0,
+        "sort_order": 2,
+    },
+    {
+        "activity_key": "DESMOMIFICACION_FITOSANITARIA",
+        "name": "Control Fitosanitario y Desmomificación",
+        "category": "FITOSANIDAD",
+        "icon": "🩺",
+        "description": "Remoción de frutos afectados por moniliasis o escoba de bruja y cubrimiento con hojarasca en el suelo.",
+        "default_fields_json": json.dumps(["labor_hours", "workers_count", "notes"]),
+        "requires_inputs": 0,
+        "requires_dose": 0,
+        "is_active": 1,
+        "is_archived": 0,
+        "sort_order": 3,
+    },
+    {
+        "activity_key": "FERTILIZACION_ORGANICA",
+        "name": "Nutrición y Biofertilización Orgánica",
+        "category": "NUTRICION",
+        "icon": "🌱",
+        "description": "Aplicación de composta, bocashi, lixiviados de lombriz o harina de rocas en corona al suelo.",
+        "default_fields_json": json.dumps(["input_used", "dose", "cost_mxn"]),
+        "requires_inputs": 1,
+        "requires_dose": 1,
+        "is_active": 1,
+        "is_archived": 0,
+        "sort_order": 4,
+    },
+    {
+        "activity_key": "CONTROL_MALEZAS",
+        "name": "Chapeo y Manejo de Coberturas",
+        "category": "MANEJO_CULTIVO",
+        "icon": "🌾",
+        "description": "Mantenimiento mecánico o manual de arvenses nobles para conservar humedad y evitar competencia.",
+        "default_fields_json": json.dumps(["labor_hours", "workers_count", "cost_mxn"]),
+        "requires_inputs": 0,
+        "requires_dose": 0,
+        "is_active": 1,
+        "is_archived": 0,
+        "sort_order": 5,
+    },
+    {
+        "activity_key": "RIEGO_DRENAJE",
+        "name": "Riego y Mantenimiento de Drenes",
+        "category": "INFRAESTRUCTURA",
+        "icon": "💧",
+        "description": "Limpieza de zanjas de drenaje parcelario o activación de riego de auxilio contra estrés hídrico.",
+        "default_fields_json": json.dumps(["labor_hours"]),
+        "requires_inputs": 0,
+        "requires_dose": 0,
+        "is_active": 1,
+        "is_archived": 0,
+        "sort_order": 6,
+    },
+    {
+        "activity_key": "APLICACION_BIOINSUMO",
+        "name": "Aplicación de Caldo Bordelés / Sulfocálcico",
+        "category": "FITOSANIDAD",
+        "icon": "🧪",
+        "description": "Fumigación preventiva de biofungicidas autorizados para agricultura orgánica.",
+        "default_fields_json": json.dumps(["input_used", "dose", "weather_condition"]),
+        "requires_inputs": 1,
+        "requires_dose": 1,
+        "is_active": 1,
+        "is_archived": 0,
+        "sort_order": 7,
+    },
+    {
+        "activity_key": "INSPECCION_FLORACION",
+        "name": "Monitoreo de Floración y Cuajado",
+        "category": "MONITOREO",
+        "icon": "🔍",
+        "description": "Conteo muestral de cojines florales, chilillos formados y polinizadores en cacaotales.",
+        "default_fields_json": json.dumps(["notes", "photos"]),
+        "requires_inputs": 0,
+        "requires_dose": 0,
+        "is_active": 1,
+        "is_archived": 0,
+        "sort_order": 8,
+    },
+]
+
+DEFAULT_LOGBOOK_INPUTS: List[Dict[str, Any]] = [
+    {
+        "input_key": "COMPOSTA_BOCASHI",
+        "name": "Composta / Bocashi Artesanal",
+        "type": "FERTILIZANTE_SOLIDO",
+        "default_unit": "kg/arbol",
+        "is_organic_certified": 1,
+        "is_active": 1,
+        "is_archived": 0,
+        "sort_order": 1,
+    },
+    {
+        "input_key": "LIXIVIADO_LOMBRIZ",
+        "name": "Lixiviado / Humus Líquido de Lombriz",
+        "type": "BIOFERTILIZANTE_LIQUIDO",
+        "default_unit": "L/ha",
+        "is_organic_certified": 1,
+        "is_active": 1,
+        "is_archived": 0,
+        "sort_order": 2,
+    },
+    {
+        "input_key": "CALDO_BORDELES",
+        "name": "Caldo Bordelés (Sulfato de cobre + Cal)",
+        "type": "BIOFUNGICIDA",
+        "default_unit": "L/mochila",
+        "is_organic_certified": 1,
+        "is_active": 1,
+        "is_archived": 0,
+        "sort_order": 3,
+    },
+    {
+        "input_key": "CALDO_SULFOCALCICO",
+        "name": "Caldo Sulfocálcico",
+        "type": "BIOFUNGICIDA",
+        "default_unit": "ml/L agua",
+        "is_organic_certified": 1,
+        "is_active": 1,
+        "is_archived": 0,
+        "sort_order": 4,
+    },
+    {
+        "input_key": "HARINA_ROCAS",
+        "name": "Harina de Rocas Basálticas / Zeolita",
+        "type": "ENMIENDA_MINERAL",
+        "default_unit": "kg/arbol",
+        "is_organic_certified": 1,
+        "is_active": 1,
+        "is_archived": 0,
+        "sort_order": 5,
+    },
+]
+
+DEFAULT_LOGBOOK_CUSTOM_FIELDS: List[Dict[str, Any]] = []
+
 PARCEL_SELECT_FIELDS = (
     "id,producer_id,parcel_name,municipality,area_hectares,geojson_payload,"
     "eudr_status,acahual_removal_post_2020,captured_at,created_at,updated_at,"
@@ -810,6 +989,177 @@ def init_local_db(db_path: Optional[str] = None) -> None:
                         log_item["updated_at_ms"],
                     ),
                 )
+        for extra_log_col in (
+            "ALTER TABLE field_logbook_entries ADD COLUMN dose TEXT",
+            "ALTER TABLE field_logbook_entries ADD COLUMN cost_mxn REAL",
+            "ALTER TABLE field_logbook_entries ADD COLUMN labor_hours REAL",
+            "ALTER TABLE field_logbook_entries ADD COLUMN workers_count INTEGER",
+            "ALTER TABLE field_logbook_entries ADD COLUMN weather_condition TEXT",
+            "ALTER TABLE field_logbook_entries ADD COLUMN custom_fields_json TEXT",
+        ):
+            try:
+                conn.execute(extra_log_col)
+            except sqlite3.OperationalError:
+                pass
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS logbook_config (
+                id TEXT PRIMARY KEY,
+                version INTEGER NOT NULL DEFAULT 1,
+                enable_photos INTEGER NOT NULL DEFAULT 1,
+                enable_inputs_used INTEGER NOT NULL DEFAULT 1,
+                enable_doses INTEGER NOT NULL DEFAULT 1,
+                enable_labor_and_costs INTEGER NOT NULL DEFAULT 1,
+                enable_weather_conditions INTEGER NOT NULL DEFAULT 1,
+                enable_satellite_comparison INTEGER NOT NULL DEFAULT 1,
+                enable_eudr_flags INTEGER NOT NULL DEFAULT 1,
+                enable_custom_fields INTEGER NOT NULL DEFAULT 1,
+                allow_producer_custom_tags INTEGER NOT NULL DEFAULT 1,
+                min_required_photos INTEGER NOT NULL DEFAULT 0,
+                updated_at_iso TEXT NOT NULL,
+                updated_by TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS logbook_activity_catalog (
+                activity_key TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                category TEXT NOT NULL,
+                icon TEXT NOT NULL,
+                description TEXT NOT NULL,
+                default_fields_json TEXT NOT NULL DEFAULT '[]',
+                requires_inputs INTEGER NOT NULL DEFAULT 0,
+                requires_dose INTEGER NOT NULL DEFAULT 0,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                is_archived INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at_iso TEXT NOT NULL,
+                updated_at_iso TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS logbook_input_catalog (
+                input_key TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                type TEXT NOT NULL,
+                default_unit TEXT NOT NULL,
+                is_organic_certified INTEGER NOT NULL DEFAULT 1,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                is_archived INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at_iso TEXT NOT NULL,
+                updated_at_iso TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS logbook_custom_fields (
+                field_key TEXT PRIMARY KEY,
+                activity_key TEXT,
+                label TEXT NOT NULL,
+                field_type TEXT NOT NULL,
+                options_json TEXT NOT NULL DEFAULT '[]',
+                required INTEGER NOT NULL DEFAULT 0,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                is_archived INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at_iso TEXT NOT NULL,
+                updated_at_iso TEXT NOT NULL
+            )
+            """
+        )
+
+        cfg_count = conn.execute("SELECT COUNT(*) FROM logbook_config").fetchone()[0]
+        if cfg_count == 0:
+            c = DEFAULT_LOGBOOK_CONFIG
+            conn.execute(
+                """
+                INSERT INTO logbook_config (
+                    id, version, enable_photos, enable_inputs_used, enable_doses,
+                    enable_labor_and_costs, enable_weather_conditions,
+                    enable_satellite_comparison, enable_eudr_flags, enable_custom_fields,
+                    allow_producer_custom_tags, min_required_photos,
+                    updated_at_iso, updated_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    c["id"],
+                    c["version"],
+                    c["enable_photos"],
+                    c["enable_inputs_used"],
+                    c["enable_doses"],
+                    c["enable_labor_and_costs"],
+                    c["enable_weather_conditions"],
+                    c["enable_satellite_comparison"],
+                    c["enable_eudr_flags"],
+                    c["enable_custom_fields"],
+                    c["allow_producer_custom_tags"],
+                    c["min_required_photos"],
+                    c["updated_at_iso"],
+                    c["updated_by"],
+                ),
+            )
+
+        act_count = conn.execute("SELECT COUNT(*) FROM logbook_activity_catalog").fetchone()[0]
+        if act_count == 0:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for act in DEFAULT_LOGBOOK_ACTIVITIES:
+                conn.execute(
+                    """
+                    INSERT INTO logbook_activity_catalog (
+                        activity_key, name, category, icon, description,
+                        default_fields_json, requires_inputs, requires_dose,
+                        is_active, is_archived, sort_order, created_at_iso, updated_at_iso
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        act["activity_key"],
+                        act["name"],
+                        act["category"],
+                        act["icon"],
+                        act["description"],
+                        act["default_fields_json"],
+                        act["requires_inputs"],
+                        act["requires_dose"],
+                        act["is_active"],
+                        act["is_archived"],
+                        act["sort_order"],
+                        now_iso,
+                        now_iso,
+                    ),
+                )
+
+        inp_count = conn.execute("SELECT COUNT(*) FROM logbook_input_catalog").fetchone()[0]
+        if inp_count == 0:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for inp in DEFAULT_LOGBOOK_INPUTS:
+                conn.execute(
+                    """
+                    INSERT INTO logbook_input_catalog (
+                        input_key, name, type, default_unit, is_organic_certified,
+                        is_active, is_archived, sort_order, created_at_iso, updated_at_iso
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        inp["input_key"],
+                        inp["name"],
+                        inp["type"],
+                        inp["default_unit"],
+                        inp["is_organic_certified"],
+                        inp["is_active"],
+                        inp["is_archived"],
+                        inp["sort_order"],
+                        now_iso,
+                        now_iso,
+                    ),
+                )
+
         for extra_col in (
             "ALTER TABLE parcels ADD COLUMN registered_at_iso TEXT",
             "ALTER TABLE parcels ADD COLUMN historical_snapshots_json TEXT",
@@ -1805,6 +2155,12 @@ def _row_to_field_log_dict(row: sqlite3.Row) -> Dict[str, Any]:
             photos = json.loads(row["photos_json"])
         except Exception:
             photos = []
+    custom_fields = {}
+    if "custom_fields_json" in row.keys() and row["custom_fields_json"]:
+        try:
+            custom_fields = json.loads(row["custom_fields_json"])
+        except Exception:
+            custom_fields = {}
     return {
         "id": row["id"],
         "parcel_id": row["parcel_id"],
@@ -1821,6 +2177,14 @@ def _row_to_field_log_dict(row: sqlite3.Row) -> Dict[str, Any]:
             row["expected_harvest_date"] if "expected_harvest_date" in row.keys() else None
         ),
         "input_used": row["input_used"] if "input_used" in row.keys() else None,
+        "dose": row["dose"] if "dose" in row.keys() else None,
+        "cost_mxn": row["cost_mxn"] if "cost_mxn" in row.keys() else None,
+        "labor_hours": row["labor_hours"] if "labor_hours" in row.keys() else None,
+        "workers_count": row["workers_count"] if "workers_count" in row.keys() else None,
+        "weather_condition": (
+            row["weather_condition"] if "weather_condition" in row.keys() else None
+        ),
+        "custom_fields": custom_fields,
         "notes": row["notes"],
         "photos": photos,
         "created_at_iso": row["created_at_iso"],
@@ -1903,6 +2267,42 @@ def create_field_logbook_entry(
         entry_dict.get("expected_harvest_date") or entry_dict.get("expectedHarvestDate")
     )
     input_used = entry_dict.get("input_used") or entry_dict.get("inputUsed")
+    dose = entry_dict.get("dose")
+    cost_mxn = entry_dict.get("cost_mxn") if "cost_mxn" in entry_dict else entry_dict.get("costMxn")
+    if cost_mxn is not None:
+        try:
+            cost_mxn = float(cost_mxn)
+        except (ValueError, TypeError):
+            cost_mxn = None
+    labor_hours = (
+        entry_dict.get("labor_hours") if "labor_hours" in entry_dict else entry_dict.get("laborHours")
+    )
+    if labor_hours is not None:
+        try:
+            labor_hours = float(labor_hours)
+        except (ValueError, TypeError):
+            labor_hours = None
+    workers_count = (
+        entry_dict.get("workers_count")
+        if "workers_count" in entry_dict
+        else entry_dict.get("workersCount")
+    )
+    if workers_count is not None:
+        try:
+            workers_count = int(workers_count)
+        except (ValueError, TypeError):
+            workers_count = None
+    weather_condition = entry_dict.get("weather_condition") or entry_dict.get("weatherCondition")
+    custom_fields = (
+        entry_dict.get("custom_fields")
+        if "custom_fields" in entry_dict
+        else entry_dict.get("customFields")
+    )
+    custom_fields_json = (
+        json.dumps(custom_fields)
+        if isinstance(custom_fields, (dict, list))
+        else (str(custom_fields) if custom_fields else "{}")
+    )
     notes = entry_dict.get("notes") or ""
     photos = entry_dict.get("photos") or []
     photos_json = json.dumps(photos) if isinstance(photos, list) else str(photos)
@@ -1919,9 +2319,10 @@ def create_field_logbook_entry(
             INSERT INTO field_logbook_entries (
                 id, parcel_id, parcel_name, producer_id, producer_name,
                 activity_type, activity_label, performed_date, fertilization_date,
-                expected_harvest_date, input_used, notes, photos_json,
-                created_at_iso, updated_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                expected_harvest_date, input_used, dose, cost_mxn, labor_hours,
+                workers_count, weather_condition, custom_fields_json,
+                notes, photos_json, created_at_iso, updated_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 parcel_id = excluded.parcel_id,
                 parcel_name = excluded.parcel_name,
@@ -1933,6 +2334,12 @@ def create_field_logbook_entry(
                 fertilization_date = excluded.fertilization_date,
                 expected_harvest_date = excluded.expected_harvest_date,
                 input_used = excluded.input_used,
+                dose = excluded.dose,
+                cost_mxn = excluded.cost_mxn,
+                labor_hours = excluded.labor_hours,
+                workers_count = excluded.workers_count,
+                weather_condition = excluded.weather_condition,
+                custom_fields_json = excluded.custom_fields_json,
                 notes = excluded.notes,
                 photos_json = excluded.photos_json,
                 updated_at_ms = excluded.updated_at_ms
@@ -1949,6 +2356,12 @@ def create_field_logbook_entry(
                 fertilization_date,
                 expected_harvest_date,
                 input_used,
+                dose,
+                cost_mxn,
+                labor_hours,
+                workers_count,
+                weather_condition,
+                custom_fields_json,
                 notes,
                 photos_json,
                 created_at_iso,
@@ -1969,10 +2382,621 @@ def create_field_logbook_entry(
         "fertilization_date": fertilization_date,
         "expected_harvest_date": expected_harvest_date,
         "input_used": input_used,
+        "dose": dose,
+        "cost_mxn": cost_mxn,
+        "labor_hours": labor_hours,
+        "workers_count": workers_count,
+        "weather_condition": weather_condition,
+        "custom_fields": (
+            json.loads(custom_fields_json) if custom_fields_json else {}
+        ),
         "notes": notes,
         "photos": photos if isinstance(photos, list) else [],
         "created_at_iso": created_at_iso,
         "updated_at_ms": updated_at_ms,
+    }
+
+
+def update_field_logbook_entry(
+    entry_id: str,
+    payload: Dict[str, Any],
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Partially or fully update an existing field logbook entry."""
+    init_local_db(db_path)
+    with _connect(db_path) as conn:
+        existing = conn.execute(
+            "SELECT * FROM field_logbook_entries WHERE id = ?", (entry_id,)
+        ).fetchone()
+        if not existing:
+            raise KeyError(f"Entrada de bitácora {entry_id} no encontrada.")
+
+        current = dict(existing)
+        activity_type = payload.get("activity_type") or payload.get("activityType") or current["activity_type"]
+        activity_label = payload.get("activity_label") or payload.get("activityLabel") or current["activity_label"]
+        performed_date = payload.get("performed_date") or payload.get("performedDate") or current["performed_date"]
+        fertilization_date = (
+            payload.get("fertilization_date")
+            if "fertilization_date" in payload
+            else (payload.get("fertilizationDate") if "fertilizationDate" in payload else current.get("fertilization_date"))
+        )
+        input_used = (
+            payload.get("input_used")
+            if "input_used" in payload
+            else (payload.get("inputUsed") if "inputUsed" in payload else current.get("input_used"))
+        )
+        dose = payload.get("dose") if "dose" in payload else current.get("dose")
+        cost_mxn = (
+            payload.get("cost_mxn")
+            if "cost_mxn" in payload
+            else (payload.get("costMxn") if "costMxn" in payload else current.get("cost_mxn"))
+        )
+        if cost_mxn is not None:
+            try:
+                cost_mxn = float(cost_mxn)
+            except (ValueError, TypeError):
+                cost_mxn = None
+        labor_hours = (
+            payload.get("labor_hours")
+            if "labor_hours" in payload
+            else (payload.get("laborHours") if "laborHours" in payload else current.get("labor_hours"))
+        )
+        if labor_hours is not None:
+            try:
+                labor_hours = float(labor_hours)
+            except (ValueError, TypeError):
+                labor_hours = None
+        workers_count = (
+            payload.get("workers_count")
+            if "workers_count" in payload
+            else (payload.get("workersCount") if "workersCount" in payload else current.get("workers_count"))
+        )
+        if workers_count is not None:
+            try:
+                workers_count = int(workers_count)
+            except (ValueError, TypeError):
+                workers_count = None
+        weather_condition = (
+            payload.get("weather_condition")
+            if "weather_condition" in payload
+            else (payload.get("weatherCondition") if "weatherCondition" in payload else current.get("weather_condition"))
+        )
+        notes = payload.get("notes") if "notes" in payload else current["notes"]
+        photos = payload.get("photos") if "photos" in payload else None
+        photos_json = (
+            json.dumps(photos) if photos is not None else current.get("photos_json", "[]")
+        )
+        custom_fields = (
+            payload.get("custom_fields")
+            if "custom_fields" in payload
+            else payload.get("customFields")
+        )
+        custom_fields_json = (
+            json.dumps(custom_fields)
+            if custom_fields is not None
+            else current.get("custom_fields_json", "{}")
+        )
+        updated_at_ms = int(time.time() * 1000)
+
+        conn.execute(
+            """
+            UPDATE field_logbook_entries
+            SET activity_type = ?, activity_label = ?, performed_date = ?,
+                fertilization_date = ?, input_used = ?, dose = ?, cost_mxn = ?,
+                labor_hours = ?, workers_count = ?, weather_condition = ?,
+                notes = ?, photos_json = ?, custom_fields_json = ?, updated_at_ms = ?
+            WHERE id = ?
+            """,
+            (
+                activity_type,
+                activity_label,
+                performed_date,
+                fertilization_date,
+                input_used,
+                dose,
+                cost_mxn,
+                labor_hours,
+                workers_count,
+                weather_condition,
+                notes,
+                photos_json,
+                custom_fields_json,
+                updated_at_ms,
+                entry_id,
+            ),
+        )
+        conn.commit()
+
+        updated_row = conn.execute(
+            "SELECT * FROM field_logbook_entries WHERE id = ?", (entry_id,)
+        ).fetchone()
+        return _row_to_field_log_dict(updated_row)
+
+
+def delete_field_logbook_entry(entry_id: str, db_path: Optional[str] = None) -> bool:
+    """Delete a logbook entry by id."""
+    init_local_db(db_path)
+    with _connect(db_path) as conn:
+        cursor = conn.execute("DELETE FROM field_logbook_entries WHERE id = ?", (entry_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def get_logbook_config(
+    include_archived: bool = False,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return the global logbook configuration, activity catalog, inputs, and custom fields."""
+    init_local_db(db_path)
+    with _connect(db_path) as conn:
+        cfg_row = conn.execute("SELECT * FROM logbook_config LIMIT 1").fetchone()
+        if not cfg_row:
+            cfg = {**DEFAULT_LOGBOOK_CONFIG}
+        else:
+            cfg = {
+                "version": int(cfg_row["version"]),
+                "enable_photos": bool(cfg_row["enable_photos"]),
+                "enable_inputs_used": bool(cfg_row["enable_inputs_used"]),
+                "enable_doses": bool(cfg_row["enable_doses"]),
+                "enable_labor_and_costs": bool(cfg_row["enable_labor_and_costs"]),
+                "enable_weather_conditions": bool(cfg_row["enable_weather_conditions"]),
+                "enable_satellite_comparison": bool(cfg_row["enable_satellite_comparison"]),
+                "enable_eudr_flags": bool(cfg_row["enable_eudr_flags"]),
+                "enable_custom_fields": bool(cfg_row["enable_custom_fields"]),
+                "allow_producer_custom_tags": bool(cfg_row["allow_producer_custom_tags"]),
+                "min_required_photos": int(cfg_row["min_required_photos"]),
+                "updated_at_iso": cfg_row["updated_at_iso"],
+                "updated_by": cfg_row["updated_by"],
+            }
+
+        act_query = (
+            "SELECT * FROM logbook_activity_catalog ORDER BY is_archived ASC, sort_order ASC"
+            if include_archived
+            else "SELECT * FROM logbook_activity_catalog WHERE is_active = 1 AND is_archived = 0 ORDER BY sort_order ASC"
+        )
+        act_rows = conn.execute(act_query).fetchall()
+        activities = []
+        for r in act_rows:
+            def_fields = []
+            if r["default_fields_json"]:
+                try:
+                    def_fields = json.loads(r["default_fields_json"])
+                except Exception:
+                    def_fields = []
+            activities.append(
+                {
+                    "activity_key": r["activity_key"],
+                    "name": r["name"],
+                    "category": r["category"],
+                    "icon": r["icon"],
+                    "description": r["description"],
+                    "default_fields": def_fields,
+                    "requires_inputs": bool(r["requires_inputs"]),
+                    "requires_dose": bool(r["requires_dose"]),
+                    "is_active": bool(r["is_active"]),
+                    "is_archived": bool(r["is_archived"]),
+                    "sort_order": int(r["sort_order"]),
+                    "created_at_iso": r["created_at_iso"],
+                    "updated_at_iso": r["updated_at_iso"],
+                }
+            )
+
+        inp_query = (
+            "SELECT * FROM logbook_input_catalog ORDER BY is_archived ASC, sort_order ASC"
+            if include_archived
+            else "SELECT * FROM logbook_input_catalog WHERE is_active = 1 AND is_archived = 0 ORDER BY sort_order ASC"
+        )
+        inp_rows = conn.execute(inp_query).fetchall()
+        inputs = [
+            {
+                "input_key": r["input_key"],
+                "name": r["name"],
+                "type": r["type"],
+                "default_unit": r["default_unit"],
+                "is_organic_certified": bool(r["is_organic_certified"]),
+                "is_active": bool(r["is_active"]),
+                "is_archived": bool(r["is_archived"]),
+                "sort_order": int(r["sort_order"]),
+            }
+            for r in inp_rows
+        ]
+
+        fld_query = (
+            "SELECT * FROM logbook_custom_fields ORDER BY is_archived ASC, sort_order ASC"
+            if include_archived
+            else "SELECT * FROM logbook_custom_fields WHERE is_active = 1 AND is_archived = 0 ORDER BY sort_order ASC"
+        )
+        fld_rows = conn.execute(fld_query).fetchall()
+        custom_fields = []
+        for r in fld_rows:
+            opts = []
+            if r["options_json"]:
+                try:
+                    opts = json.loads(r["options_json"])
+                except Exception:
+                    opts = []
+            custom_fields.append(
+                {
+                    "field_key": r["field_key"],
+                    "activity_key": r["activity_key"],
+                    "label": r["label"],
+                    "field_type": r["field_type"],
+                    "options": opts,
+                    "required": bool(r["required"]),
+                    "is_active": bool(r["is_active"]),
+                    "is_archived": bool(r["is_archived"]),
+                    "sort_order": int(r["sort_order"]),
+                }
+            )
+
+        return {
+            "config": cfg,
+            "activities": activities,
+            "inputs": inputs,
+            "custom_fields": custom_fields,
+        }
+
+
+def update_logbook_toggles(
+    toggles: Dict[str, Any],
+    updated_by: str,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Update toggle flags in logbook_config and increment version."""
+    init_local_db(db_path)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with _connect(db_path) as conn:
+        current = conn.execute("SELECT * FROM logbook_config LIMIT 1").fetchone()
+        version = (int(current["version"]) + 1) if current else 2
+
+        fields = [
+            "enable_photos",
+            "enable_inputs_used",
+            "enable_doses",
+            "enable_labor_and_costs",
+            "enable_weather_conditions",
+            "enable_satellite_comparison",
+            "enable_eudr_flags",
+            "enable_custom_fields",
+            "allow_producer_custom_tags",
+            "min_required_photos",
+        ]
+        updates = []
+        params = []
+        for f in fields:
+            if f in toggles:
+                updates.append(f"{f} = ?")
+                params.append(int(toggles[f]))
+
+        if updates:
+            updates.extend(["version = ?", "updated_at_iso = ?", "updated_by = ?"])
+            params.extend([version, now_iso, updated_by])
+            conn.execute(
+                f"UPDATE logbook_config SET {', '.join(updates)} WHERE id = 'global_config'",
+                params,
+            )
+            conn.commit()
+
+    return get_logbook_config(include_archived=True, db_path=db_path)
+
+
+def upsert_logbook_activity(
+    activity_dict: Dict[str, Any],
+    updated_by: str,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create or update an activity in logbook_activity_catalog."""
+    init_local_db(db_path)
+    raw_key = activity_dict.get("activity_key") or activity_dict.get("name", "")
+    activity_key = re.sub(r"[^a-zA-Z0-9_]", "_", raw_key).strip("_").upper()
+    if len(activity_key) < 3:
+        raise ValueError("activity_key debe tener al menos 3 caracteres alfanuméricos.")
+
+    name = (activity_dict.get("name") or activity_key).strip()
+    category = (activity_dict.get("category") or "MANEJO_CULTIVO").strip().upper()
+    icon = (activity_dict.get("icon") or "📋").strip()
+    description = (activity_dict.get("description") or "").strip()
+    default_fields = activity_dict.get("default_fields") or []
+    default_fields_json = (
+        json.dumps(default_fields) if isinstance(default_fields, list) else str(default_fields)
+    )
+    requires_inputs = 1 if activity_dict.get("requires_inputs") else 0
+    requires_dose = 1 if activity_dict.get("requires_dose") else 0
+    is_active = 1 if activity_dict.get("is_active", True) else 0
+    sort_order = int(activity_dict.get("sort_order") or 0)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO logbook_activity_catalog (
+                activity_key, name, category, icon, description,
+                default_fields_json, requires_inputs, requires_dose,
+                is_active, is_archived, sort_order, created_at_iso, updated_at_iso
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+            ON CONFLICT(activity_key) DO UPDATE SET
+                name = excluded.name,
+                category = excluded.category,
+                icon = excluded.icon,
+                description = excluded.description,
+                default_fields_json = excluded.default_fields_json,
+                requires_inputs = excluded.requires_inputs,
+                requires_dose = excluded.requires_dose,
+                is_active = excluded.is_active,
+                sort_order = excluded.sort_order,
+                updated_at_iso = excluded.updated_at_iso
+            """,
+            (
+                activity_key,
+                name,
+                category,
+                icon,
+                description,
+                default_fields_json,
+                requires_inputs,
+                requires_dose,
+                is_active,
+                sort_order,
+                now_iso,
+                now_iso,
+            ),
+        )
+        conn.execute(
+            "UPDATE logbook_config SET version = version + 1, updated_at_iso = ?, updated_by = ?",
+            (now_iso, updated_by),
+        )
+        conn.commit()
+
+    return get_logbook_config(include_archived=True, db_path=db_path)
+
+
+def delete_or_archive_logbook_activity(
+    activity_key: str,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Intelligently archive if entries reference activity_key; otherwise hard-delete."""
+    init_local_db(db_path)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with _connect(db_path) as conn:
+        ref_count = conn.execute(
+            "SELECT COUNT(*) FROM field_logbook_entries WHERE activity_type = ?",
+            (activity_key,),
+        ).fetchone()[0]
+
+        if ref_count > 0:
+            conn.execute(
+                """
+                UPDATE logbook_activity_catalog
+                SET is_active = 0, is_archived = 1, updated_at_iso = ?
+                WHERE activity_key = ?
+                """,
+                (now_iso, activity_key),
+            )
+            action = "ARCHIVED"
+        else:
+            conn.execute(
+                "DELETE FROM logbook_activity_catalog WHERE activity_key = ?",
+                (activity_key,),
+            )
+            action = "DELETED"
+
+        conn.execute(
+            "UPDATE logbook_config SET version = version + 1, updated_at_iso = ?, updated_by = 'admin_action'",
+            (now_iso,),
+        )
+        conn.commit()
+
+    return {
+        "action": action,
+        "activity_key": activity_key,
+        "referenced_logs_count": ref_count,
+        "full_config": get_logbook_config(include_archived=True, db_path=db_path),
+    }
+
+
+def upsert_logbook_input(
+    input_dict: Dict[str, Any],
+    updated_by: str,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create or update an input in logbook_input_catalog."""
+    init_local_db(db_path)
+    raw_key = input_dict.get("input_key") or input_dict.get("name", "")
+    input_key = re.sub(r"[^a-zA-Z0-9_]", "_", raw_key).strip("_").upper()
+    if len(input_key) < 3:
+        raise ValueError("input_key debe tener al menos 3 caracteres alfanuméricos.")
+
+    name = (input_dict.get("name") or input_key).strip()
+    input_type = (input_dict.get("type") or "INSUMO_GENERAL").strip().upper()
+    default_unit = (input_dict.get("default_unit") or "kg").strip()
+    is_organic = 1 if input_dict.get("is_organic_certified", True) else 0
+    is_active = 1 if input_dict.get("is_active", True) else 0
+    sort_order = int(input_dict.get("sort_order") or 0)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO logbook_input_catalog (
+                input_key, name, type, default_unit, is_organic_certified,
+                is_active, is_archived, sort_order, created_at_iso, updated_at_iso
+            ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+            ON CONFLICT(input_key) DO UPDATE SET
+                name = excluded.name,
+                type = excluded.type,
+                default_unit = excluded.default_unit,
+                is_organic_certified = excluded.is_organic_certified,
+                is_active = excluded.is_active,
+                sort_order = excluded.sort_order,
+                updated_at_iso = excluded.updated_at_iso
+            """,
+            (
+                input_key,
+                name,
+                input_type,
+                default_unit,
+                is_organic,
+                is_active,
+                sort_order,
+                now_iso,
+                now_iso,
+            ),
+        )
+        conn.execute(
+            "UPDATE logbook_config SET version = version + 1, updated_at_iso = ?, updated_by = ?",
+            (now_iso, updated_by),
+        )
+        conn.commit()
+
+    return get_logbook_config(include_archived=True, db_path=db_path)
+
+
+def delete_or_archive_logbook_input(
+    input_key: str,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Intelligently archive if input is referenced in history; otherwise delete."""
+    init_local_db(db_path)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with _connect(db_path) as conn:
+        ref_count = conn.execute(
+            "SELECT COUNT(*) FROM field_logbook_entries WHERE input_used LIKE ?",
+            (f"%{input_key}%",),
+        ).fetchone()[0]
+
+        if ref_count > 0:
+            conn.execute(
+                """
+                UPDATE logbook_input_catalog
+                SET is_active = 0, is_archived = 1, updated_at_iso = ?
+                WHERE input_key = ?
+                """,
+                (now_iso, input_key),
+            )
+            action = "ARCHIVED"
+        else:
+            conn.execute(
+                "DELETE FROM logbook_input_catalog WHERE input_key = ?",
+                (input_key,),
+            )
+            action = "DELETED"
+
+        conn.execute(
+            "UPDATE logbook_config SET version = version + 1, updated_at_iso = ?, updated_by = 'admin_action'",
+            (now_iso,),
+        )
+        conn.commit()
+
+    return {
+        "action": action,
+        "input_key": input_key,
+        "referenced_logs_count": ref_count,
+        "full_config": get_logbook_config(include_archived=True, db_path=db_path),
+    }
+
+
+def upsert_logbook_custom_field(
+    field_dict: Dict[str, Any],
+    updated_by: str,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create or update a custom field definition."""
+    init_local_db(db_path)
+    raw_key = field_dict.get("field_key") or field_dict.get("label", "")
+    field_key = re.sub(r"[^a-zA-Z0-9_]", "_", raw_key).strip("_").lower()
+    if len(field_key) < 2:
+        raise ValueError("field_key debe tener al menos 2 caracteres alfanuméricos.")
+
+    activity_key = field_dict.get("activity_key")
+    label = (field_dict.get("label") or field_key).strip()
+    field_type = (field_dict.get("field_type") or "TEXT").strip().upper()
+    options = field_dict.get("options") or []
+    options_json = json.dumps(options) if isinstance(options, list) else str(options)
+    required = 1 if field_dict.get("required") else 0
+    is_active = 1 if field_dict.get("is_active", True) else 0
+    sort_order = int(field_dict.get("sort_order") or 0)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO logbook_custom_fields (
+                field_key, activity_key, label, field_type, options_json,
+                required, is_active, is_archived, sort_order, created_at_iso, updated_at_iso
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+            ON CONFLICT(field_key) DO UPDATE SET
+                activity_key = excluded.activity_key,
+                label = excluded.label,
+                field_type = excluded.field_type,
+                options_json = excluded.options_json,
+                required = excluded.required,
+                is_active = excluded.is_active,
+                sort_order = excluded.sort_order,
+                updated_at_iso = excluded.updated_at_iso
+            """,
+            (
+                field_key,
+                activity_key,
+                label,
+                field_type,
+                options_json,
+                required,
+                is_active,
+                sort_order,
+                now_iso,
+                now_iso,
+            ),
+        )
+        conn.execute(
+            "UPDATE logbook_config SET version = version + 1, updated_at_iso = ?, updated_by = ?",
+            (now_iso, updated_by),
+        )
+        conn.commit()
+
+    return get_logbook_config(include_archived=True, db_path=db_path)
+
+
+def delete_or_archive_logbook_custom_field(
+    field_key: str,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Intelligently archive if custom field is referenced in history; otherwise delete."""
+    init_local_db(db_path)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with _connect(db_path) as conn:
+        ref_count = conn.execute(
+            "SELECT COUNT(*) FROM field_logbook_entries WHERE custom_fields_json LIKE ?",
+            (f"%{field_key}%",),
+        ).fetchone()[0]
+
+        if ref_count > 0:
+            conn.execute(
+                """
+                UPDATE logbook_custom_fields
+                SET is_active = 0, is_archived = 1, updated_at_iso = ?
+                WHERE field_key = ?
+                """,
+                (now_iso, field_key),
+            )
+            action = "ARCHIVED"
+        else:
+            conn.execute(
+                "DELETE FROM logbook_custom_fields WHERE field_key = ?",
+                (field_key,),
+            )
+            action = "DELETED"
+
+        conn.execute(
+            "UPDATE logbook_config SET version = version + 1, updated_at_iso = ?, updated_by = 'admin_action'",
+            (now_iso,),
+        )
+        conn.commit()
+
+    return {
+        "action": action,
+        "field_key": field_key,
+        "referenced_logs_count": ref_count,
+        "full_config": get_logbook_config(include_archived=True, db_path=db_path),
     }
 
 

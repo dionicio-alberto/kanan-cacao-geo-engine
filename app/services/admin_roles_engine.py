@@ -42,6 +42,7 @@ DEFAULT_ROLE_DEFINITIONS: List[Dict[str, Any]] = [
             "can_view_carbon": True,
             "can_edit_regdate": True,
             "can_manage_roles": True,
+            "can_configure_logbook": True,
         },
     },
     {
@@ -59,6 +60,7 @@ DEFAULT_ROLE_DEFINITIONS: List[Dict[str, Any]] = [
             "can_view_carbon": True,
             "can_edit_regdate": False,
             "can_manage_roles": False,
+            "can_configure_logbook": False,
         },
     },
     {
@@ -76,6 +78,7 @@ DEFAULT_ROLE_DEFINITIONS: List[Dict[str, Any]] = [
             "can_view_carbon": False,
             "can_edit_regdate": False,
             "can_manage_roles": False,
+            "can_configure_logbook": False,
         },
     },
     {
@@ -93,6 +96,7 @@ DEFAULT_ROLE_DEFINITIONS: List[Dict[str, Any]] = [
             "can_view_carbon": True,
             "can_edit_regdate": False,
             "can_manage_roles": False,
+            "can_configure_logbook": False,
         },
     },
     {
@@ -110,6 +114,7 @@ DEFAULT_ROLE_DEFINITIONS: List[Dict[str, Any]] = [
             "can_view_carbon": True,
             "can_edit_regdate": False,
             "can_manage_roles": False,
+            "can_configure_logbook": False,
         },
     },
 ]
@@ -249,6 +254,7 @@ def _normalize_permissions(raw: Optional[Dict[str, Any]]) -> Dict[str, bool]:
         "can_view_carbon": False,
         "can_edit_regdate": False,
         "can_manage_roles": False,
+        "can_configure_logbook": False,
     }
     if isinstance(raw, dict):
         for k in base:
@@ -362,6 +368,34 @@ def verify_admin_requester(
             "realizar esta operación."
         )
     return "admin_astra"
+
+
+def verify_logbook_config_requester(
+    authorization: Optional[str] = None,
+    requester_role: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> str:
+    """
+    Ensure caller is admin_astra or has a role granting can_configure_logbook.
+    """
+    try:
+        return verify_admin_requester(
+            authorization=authorization, requester_role=requester_role, db_path=db_path
+        )
+    except PermissionError:
+        pass
+
+    role_norm = (requester_role or "").strip().lower()
+    if role_norm:
+        definitions = list_role_definitions(db_path=db_path)
+        matching = next((r for r in definitions if r["role_key"] == role_norm), None)
+        if matching and matching.get("permissions", {}).get("can_configure_logbook"):
+            return role_norm
+
+    raise PermissionError(
+        "Acceso denegado: se requieren permisos de configuración de bitácora "
+        "(can_configure_logbook) o rol admin_astra."
+    )
 
 
 def get_effective_profile_role(
@@ -582,6 +616,7 @@ def upsert_role_definition(
     if clean_key == "admin_astra":
         norm_perms["can_manage_roles"] = True
         norm_perms["can_edit_regdate"] = True
+        norm_perms["can_configure_logbook"] = True
 
     now_iso = datetime.now(timezone.utc).isoformat()
     if _is_supabase_active(db_path):

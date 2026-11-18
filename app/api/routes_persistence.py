@@ -7,9 +7,11 @@ from pydantic import BaseModel, Field
 from app.services.admin_roles_engine import verify_admin_requester
 from app.services.local_persistence_engine import (
     create_field_logbook_entry,
+    delete_field_logbook_entry,
     delete_parcel_record,
     get_active_storage_engine,
     get_cached_parcel_map_image,
+    get_logbook_config,
     get_or_create_parcel_historical_snapshots,
     get_parcel_document_file,
     list_field_logbook_entries,
@@ -19,6 +21,7 @@ from app.services.local_persistence_engine import (
     sync_field_logbook_entries,
     sync_offline_parcels,
     toggle_parcel_custf,
+    update_field_logbook_entry,
     update_parcel_metadata,
     update_parcel_registration_date,
     upload_parcel_document,
@@ -277,6 +280,17 @@ class FieldLogbookEntryRequest(BaseModel):
     expectedHarvestDate: Optional[str] = None
     input_used: Optional[str] = None
     inputUsed: Optional[str] = None
+    dose: Optional[str] = None
+    cost_mxn: Optional[float] = None
+    costMxn: Optional[float] = None
+    labor_hours: Optional[float] = None
+    laborHours: Optional[float] = None
+    workers_count: Optional[int] = None
+    workersCount: Optional[int] = None
+    weather_condition: Optional[str] = None
+    weatherCondition: Optional[str] = None
+    custom_fields: Optional[Dict[str, Any]] = None
+    customFields: Optional[Dict[str, Any]] = None
     notes: str = ""
     photos: List[Any] = Field(default_factory=list)
     created_at_iso: Optional[str] = None
@@ -287,6 +301,12 @@ class FieldLogbookEntryRequest(BaseModel):
 class FieldLogbookSyncRequest(BaseModel):
     last_pulled_at_ms: Optional[int] = None
     pushed_entries: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+@router.get("/logbook/config")
+def get_logbook_config_endpoint() -> Dict[str, Any]:
+    """Return active logbook configuration and catalog for field operators and producers."""
+    return get_logbook_config(include_archived=False)
 
 
 @router.get("/logbook")
@@ -322,6 +342,31 @@ def create_logbook_endpoint(payload: FieldLogbookEntryRequest) -> Dict[str, Any]
         }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.patch("/logbook/{entry_id}")
+def update_logbook_endpoint(entry_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        updated = update_field_logbook_entry(entry_id=entry_id, payload=payload)
+        return {
+            "status": "UPDATED",
+            "entry": updated,
+        }
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/logbook/{entry_id}")
+def delete_logbook_endpoint(entry_id: str) -> Dict[str, Any]:
+    deleted = delete_field_logbook_entry(entry_id=entry_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Entrada de bitácora {entry_id} no encontrada.")
+    return {
+        "status": "DELETED",
+        "entry_id": entry_id,
+    }
 
 
 @router.post("/logbook/sync")
