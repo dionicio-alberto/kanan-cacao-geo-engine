@@ -2,11 +2,13 @@
 
 from pathlib import Path
 from app.services.local_persistence_engine import (
+    delete_parcel_record,
     list_persisted_parcels,
     record_persisted_reception,
     supabase_row_to_parcel_dict,
     sync_offline_parcels,
     toggle_parcel_custf,
+    update_parcel_metadata,
 )
 
 
@@ -305,3 +307,61 @@ def test_admin_can_assign_profile_roles_and_edit_role_definitions(tmp_path: Path
     )
     assert mateo["role"] == "inspector_campo"
     assert mateo["role_display_name"] == "Inspector de Campo Cacao"
+
+
+def test_update_and_delete_parcel_metadata(tmp_path: Path) -> None:
+    db_file = str(tmp_path / "test_update_delete.db")
+    parcels = list_persisted_parcels(db_file)
+    assert len(parcels) == 3
+
+    # Update parcel name and producer name
+    updated = update_parcel_metadata(
+        parcel_id="PAR-CHONTALPA-01",
+        parcel_name="Finca La Chontalpa Lote 1 - Editada",
+        producer_name="Mateo Chablé Méndez (Actualizado)",
+        municipality="Comalcalco Norte",
+        db_path=db_file,
+    )
+    assert updated["parcel_name"] == "Finca La Chontalpa Lote 1 - Editada"
+    assert updated["producer_name"] == "Mateo Chablé Méndez (Actualizado)"
+    assert updated["municipality"] == "Comalcalco Norte"
+
+    # Delete parcel
+    res = delete_parcel_record("PAR-CHONTALPA-01", db_path=db_file)
+    assert res is True
+
+    remaining = list_persisted_parcels(db_file)
+    assert len(remaining) == 2
+    assert not any(p["parcel_id"] == "PAR-CHONTALPA-01" for p in remaining)
+
+
+def test_api_patch_and_delete_parcel_endpoints(tmp_path: Path, monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    db_file = str(tmp_path / "test_api.db")
+    monkeypatch.setenv("KANAN_FORCE_SQLITE_ONLY", "1")
+    monkeypatch.setattr("app.services.local_persistence_engine.DEFAULT_DB_PATH", db_file)
+
+    client = TestClient(app)
+
+    # Test PATCH endpoint
+    patch_res = client.patch(
+        "/api/v1/parcels/PAR-CUNDUACAN-03",
+        json={
+            "parcel_name": "Rancho San Antonio - Editado API",
+            "producer_name": "Rosa Gómez Cundua (API)",
+            "municipality": "Cunduacán Centro",
+        },
+    )
+    assert patch_res.status_code == 200
+    data = patch_res.json()
+    assert data["status"] == "UPDATED"
+    assert data["parcel"]["parcel_name"] == "Rancho San Antonio - Editado API"
+    assert data["parcel"]["producer_name"] == "Rosa Gómez Cundua (API)"
+
+    # Test DELETE endpoint
+    del_res = client.delete("/api/v1/parcels/PAR-CUNDUACAN-03")
+    assert del_res.status_code == 200
+    del_data = del_res.json()
+    assert del_data["status"] == "DELETED"

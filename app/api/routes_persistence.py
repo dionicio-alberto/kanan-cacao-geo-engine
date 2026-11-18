@@ -6,6 +6,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from app.services.admin_roles_engine import verify_admin_requester
 from app.services.local_persistence_engine import (
+    delete_parcel_record,
     get_active_storage_engine,
     get_cached_parcel_map_image,
     get_or_create_parcel_historical_snapshots,
@@ -15,6 +16,7 @@ from app.services.local_persistence_engine import (
     record_persisted_reception,
     sync_offline_parcels,
     toggle_parcel_custf,
+    update_parcel_metadata,
     update_parcel_registration_date,
     upload_parcel_document,
 )
@@ -41,6 +43,13 @@ class UpdateRegistrationDateRequest(BaseModel):
     changed_by_role: str = Field(..., min_length=1)
 
 
+class UpdateParcelMetadataRequest(BaseModel):
+    parcel_name: Optional[str] = None
+    producer_name: Optional[str] = None
+    municipality: Optional[str] = None
+    area_hectares: Optional[float] = None
+
+
 @router.get("/parcels")
 def get_parcels_endpoint() -> Dict[str, Any]:
     parcels = list_persisted_parcels()
@@ -62,6 +71,40 @@ def toggle_custf_endpoint(parcel_id: str) -> Dict[str, Any]:
         }
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.patch("/parcels/{parcel_id}")
+def update_parcel_endpoint(
+    parcel_id: str, payload: UpdateParcelMetadataRequest
+) -> Dict[str, Any]:
+    try:
+        updated = update_parcel_metadata(
+            parcel_id=parcel_id,
+            parcel_name=payload.parcel_name,
+            producer_name=payload.producer_name,
+            municipality=payload.municipality,
+            area_hectares=payload.area_hectares,
+        )
+        return {
+            "status": "UPDATED",
+            "storage_engine": get_active_storage_engine(),
+            "parcel": updated,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.delete("/parcels/{parcel_id}")
+def delete_parcel_endpoint(parcel_id: str) -> Dict[str, Any]:
+    try:
+        delete_parcel_record(parcel_id=parcel_id)
+        return {
+            "status": "DELETED",
+            "parcel_id": parcel_id,
+            "storage_engine": get_active_storage_engine(),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.patch("/parcels/{parcel_id}/registration-date")

@@ -624,6 +624,7 @@ def init_local_db(db_path: Optional[str] = None) -> None:
             """
             CREATE TABLE IF NOT EXISTS parcels (
                 parcel_id TEXT PRIMARY KEY,
+                parcel_name TEXT,
                 producer_id TEXT NOT NULL,
                 producer_name TEXT NOT NULL,
                 municipality TEXT NOT NULL,
@@ -645,6 +646,12 @@ def init_local_db(db_path: Optional[str] = None) -> None:
         try:
             conn.execute(
                 "ALTER TABLE parcels ADD COLUMN historical_snapshots_json TEXT"
+            )
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute(
+                "ALTER TABLE parcels ADD COLUMN parcel_name TEXT"
             )
         except sqlite3.OperationalError:
             pass
@@ -753,6 +760,11 @@ def _row_to_parcel_dict(row: sqlite3.Row) -> Dict[str, Any]:
         persisted_flag = False
     return {
         "parcel_id": row["parcel_id"],
+        "parcel_name": (
+            row["parcel_name"]
+            if "parcel_name" in row.keys() and row["parcel_name"]
+            else row["producer_name"]
+        ),
         "producer_id": row["producer_id"],
         "producer_name": row["producer_name"],
         "municipality": row["municipality"],
@@ -1495,3 +1507,183 @@ def update_parcel_registration_date(
             "SELECT * FROM parcels WHERE parcel_id = ?", (parcel_id,)
         ).fetchone()
         return _row_to_parcel_dict(updated_row)
+
+
+def update_parcel_metadata(
+    parcel_id: str,
+    parcel_name: Optional[str] = None,
+    producer_name: Optional[str] = None,
+    municipality: Optional[str] = None,
+    area_hectares: Optional[float] = None,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Allow modifying parcel name, producer name, municipality and area.
+    Updates Supabase PostGIS (both parcels and profiles table) when active,
+    or local SQLite database.
+    """
+    if is_supabase_rw_active(db_path):
+        url, _ = _get_supabase_config()
+        with httpx.Client(timeout=15.0) as client:
+            res = client.get(
+                f"{url}/rest/v1/parcels",
+                params={"id": f"eq.{parcel_id}", "select": PARCEL_SELECT_FIELDS},
+                headers=_pg_headers(),
+            )
+            res.raise_for_status()
+            rows = res.json()
+            if not rows:
+                raise ValueError(f"Parcela {parcel_id} no encontrada en Supabase.")
+            row = rows[0]
+
+            patch_payload: Dict[str, Any] = {
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            }
+            if parcel_name and parcel_name.strip():
+                patch_payload["parcel_name"] = parcel_name.strip()
+            if municipality and municipality.strip():
+                patch_payload["municipality"] = municipality.strip()
+            if area_hectares is not None and area_hectares > 0:
+                patch_payload["area_hectares"] = round(area_hectares, 4)
+
+            payload = dict(row.get("geojson_payload") or {})
+            props = dict(payload.get("properties") or {})
+            if parcel_name and parcel_name.strip():
+                props["parcel_name"] = parcel_name.strip()
+            if producer_name and producer_name.strip():
+                props["producer_name"] = producer_name.strip()
+            if municipality and municipality.strip():
+                props["municipality"] = municipality.strip()
+            payload["properties"] = props
+            patch_payload["geojson_payload"] = payload
+
+            client.patch(
+                f"{url}/rest/v1/parcels",
+                params={"id": f"eq.{parcel_id}"},
+                headers=_pg_headers(),
+                json=patch_payload,
+            )
+
+            if producer_name and producer_name.strip() and row.get("producer_id"):
+                try:
+                    client.patch(
+                        f"{url}/rest/v1/profiles",
+                        params={"id": f"eq.{row['producer_id']}"},
+                        headers=_pg_headers(),
+                        json={
+                            "full_name": producer_name.strip(),
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        },
+                    )
+                except httpx.HTTPError:
+                    pass
+
+        updated = _fetch_supabase_parcels(parcel_id=parcel_id)
+        if not updated:
+            raise ValueError(f"No se pudo recargar la parcela {parcel_id} actualizada.")
+        return updated[0]
+
+    init_local_db(db_path)
+    now_ms = int(time.time() * 1000)
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM parcels WHERE parcel_id = ?", (parcel_id,)
+        ).fetchone()
+        if not row:
+            raise ValueError(f"Parcela {parcel_id} no encontrada en base local.")
+
+        new_parcel_name = (
+            parcel_name.strip()
+            if parcel_name and parcel_name.strip()
+            else row["parcel_name"]
+        )
+        new_producer_name = (
+            producer_name.strip()
+            if producer_name and producer_name.strip()
+            else row["producer_name"]
+        )
+        new_municipality = (
+            municipality.strip()
+            if municipality and municipality.strip()
+            else row["municipality"]
+        )
+        new_area = (
+            float(area_hectares)
+            if area_hectares is not None and area_hectares > 0
+            else float(row["area_hectares"])
+        )
+
+        conn.execute(
+            """
+            UPDATE parcels
+            SET parcel_name = ?, producer_name = ?, municipality = ?,
+                area_hectares = ?, updated_at_ms = ?
+            WHERE parcel_id = ?
+            """,
+            (
+                new_parcel_name,
+                new_producer_name,
+                new_municipality,
+                new_area,
+                now_ms,
+                parcel_id,
+            ),
+        )
+        conn.commit()
+        updated_row = conn.execute(
+            "SELECT * FROM parcels WHERE parcel_id = ?", (parcel_id,)
+        ).fetchone()
+        return _row_to_parcel_dict(updated_row)
+
+
+def delete_parcel_record(parcel_id: str, db_path: Optional[str] = None) -> bool:
+    """
+    Delete a parcel record and all its associated dependencies from Supabase or local SQLite.
+    """
+    if is_supabase_rw_active(db_path):
+        url, _ = _get_supabase_config()
+        with httpx.Client(timeout=15.0) as client:
+            client.delete(
+                f"{url}/rest/v1/legality_documents",
+                params={"parcel_id": f"eq.{parcel_id}"},
+                headers=_pg_headers(),
+            )
+            client.delete(
+                f"{url}/rest/v1/eudr_audits",
+                params={"parcel_id": f"eq.{parcel_id}"},
+                headers=_pg_headers(),
+            )
+            client.delete(
+                f"{url}/rest/v1/shade_tree_inventories",
+                params={"parcel_id": f"eq.{parcel_id}"},
+                headers=_pg_headers(),
+            )
+            client.delete(
+                f"{url}/rest/v1/harvest_benefit_logs",
+                params={"parcel_id": f"eq.{parcel_id}"},
+                headers=_pg_headers(),
+            )
+            client.delete(
+                f"{url}/rest/v1/pre_harvest_logs",
+                params={"parcel_id": f"eq.{parcel_id}"},
+                headers=_pg_headers(),
+            )
+            client.delete(
+                f"{url}/rest/v1/epcis_collection_events",
+                params={"parcel_id": f"eq.{parcel_id}"},
+                headers=_pg_headers(),
+            )
+            del_res = client.delete(
+                f"{url}/rest/v1/parcels",
+                params={"id": f"eq.{parcel_id}"},
+                headers=_pg_headers(),
+            )
+            del_res.raise_for_status()
+            return True
+
+    init_local_db(db_path)
+    with _connect(db_path) as conn:
+        conn.execute("DELETE FROM parcel_documents WHERE parcel_id = ?", (parcel_id,))
+        conn.execute("DELETE FROM parcels WHERE parcel_id = ?", (parcel_id,))
+        conn.commit()
+        return True
