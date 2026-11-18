@@ -121,7 +121,10 @@ DEFAULT_LOGBOOK_ACTIVITIES: List[Dict[str, Any]] = [
         "name": "Manejo de Sombra y Poda Forestal",
         "category": "AGROFORESTERIA",
         "icon": "🌳",
-        "description": "Regulación de luz solar mediante poda de árboles de sombra (guamo, cedro, macuilí) para prevenir exceso de humedad.",
+        "description": (
+            "Regulación de luz solar mediante poda de árboles de sombra "
+            "(guamo, cedro, macuilí) para prevenir exceso de humedad."
+        ),
         "default_fields_json": json.dumps(["labor_hours", "workers_count"]),
         "requires_inputs": 0,
         "requires_dose": 0,
@@ -134,7 +137,10 @@ DEFAULT_LOGBOOK_ACTIVITIES: List[Dict[str, Any]] = [
         "name": "Poda de Cacao (Formación / Mantenimiento / Fitosanitaria)",
         "category": "MANEJO_CULTIVO",
         "icon": "✂️",
-        "description": "Eliminación de chupones, ramas bajeras, enfermas o secas para facilitar aireación y floración.",
+        "description": (
+            "Eliminación de chupones, ramas bajeras, enfermas o secas "
+            "para facilitar aireación y floración."
+        ),
         "default_fields_json": json.dumps(["labor_hours", "workers_count"]),
         "requires_inputs": 0,
         "requires_dose": 0,
@@ -147,7 +153,10 @@ DEFAULT_LOGBOOK_ACTIVITIES: List[Dict[str, Any]] = [
         "name": "Control Fitosanitario y Desmomificación",
         "category": "FITOSANIDAD",
         "icon": "🩺",
-        "description": "Remoción de frutos afectados por moniliasis o escoba de bruja y cubrimiento con hojarasca en el suelo.",
+        "description": (
+            "Remoción de frutos afectados por moniliasis o escoba de bruja "
+            "y cubrimiento con hojarasca en el suelo."
+        ),
         "default_fields_json": json.dumps(["labor_hours", "workers_count", "notes"]),
         "requires_inputs": 0,
         "requires_dose": 0,
@@ -160,7 +169,10 @@ DEFAULT_LOGBOOK_ACTIVITIES: List[Dict[str, Any]] = [
         "name": "Nutrición y Biofertilización Orgánica",
         "category": "NUTRICION",
         "icon": "🌱",
-        "description": "Aplicación de composta, bocashi, lixiviados de lombriz o harina de rocas en corona al suelo.",
+        "description": (
+            "Aplicación de composta, bocashi, lixiviados de lombriz o harina de rocas "
+            "en corona al suelo."
+        ),
         "default_fields_json": json.dumps(["input_used", "dose", "cost_mxn"]),
         "requires_inputs": 1,
         "requires_dose": 1,
@@ -173,7 +185,10 @@ DEFAULT_LOGBOOK_ACTIVITIES: List[Dict[str, Any]] = [
         "name": "Chapeo y Manejo de Coberturas",
         "category": "MANEJO_CULTIVO",
         "icon": "🌾",
-        "description": "Mantenimiento mecánico o manual de arvenses nobles para conservar humedad y evitar competencia.",
+        "description": (
+            "Mantenimiento mecánico o manual de arvenses nobles para conservar "
+            "humedad y evitar competencia."
+        ),
         "default_fields_json": json.dumps(["labor_hours", "workers_count", "cost_mxn"]),
         "requires_inputs": 0,
         "requires_dose": 0,
@@ -186,7 +201,10 @@ DEFAULT_LOGBOOK_ACTIVITIES: List[Dict[str, Any]] = [
         "name": "Riego y Mantenimiento de Drenes",
         "category": "INFRAESTRUCTURA",
         "icon": "💧",
-        "description": "Limpieza de zanjas de drenaje parcelario o activación de riego de auxilio contra estrés hídrico.",
+        "description": (
+            "Limpieza de zanjas de drenaje parcelario o activación de riego de "
+            "auxilio contra estrés hídrico."
+        ),
         "default_fields_json": json.dumps(["labor_hours"]),
         "requires_inputs": 0,
         "requires_dose": 0,
@@ -199,7 +217,10 @@ DEFAULT_LOGBOOK_ACTIVITIES: List[Dict[str, Any]] = [
         "name": "Aplicación de Caldo Bordelés / Sulfocálcico",
         "category": "FITOSANIDAD",
         "icon": "🧪",
-        "description": "Fumigación preventiva de biofungicidas autorizados para agricultura orgánica.",
+        "description": (
+            "Fumigación preventiva de biofungicidas autorizados para "
+            "agricultura orgánica."
+        ),
         "default_fields_json": json.dumps(["input_used", "dose", "weather_condition"]),
         "requires_inputs": 1,
         "requires_dose": 1,
@@ -212,7 +233,10 @@ DEFAULT_LOGBOOK_ACTIVITIES: List[Dict[str, Any]] = [
         "name": "Monitoreo de Floración y Cuajado",
         "category": "MONITOREO",
         "icon": "🔍",
-        "description": "Conteo muestral de cojines florales, chilillos formados y polinizadores en cacaotales.",
+        "description": (
+            "Conteo muestral de cojines florales, chilillos formados y "
+            "polinizadores en cacaotales."
+        ),
         "default_fields_json": json.dumps(["notes", "photos"]),
         "requires_inputs": 0,
         "requires_dose": 0,
@@ -2268,36 +2292,34 @@ def create_field_logbook_entry(
     )
     input_used = entry_dict.get("input_used") or entry_dict.get("inputUsed")
     dose = entry_dict.get("dose")
-    cost_mxn = entry_dict.get("cost_mxn") if "cost_mxn" in entry_dict else entry_dict.get("costMxn")
+    cost_mxn = entry_dict.get("cost_mxn")
+    if cost_mxn is None:
+        cost_mxn = entry_dict.get("costMxn")
     if cost_mxn is not None:
         try:
             cost_mxn = float(cost_mxn)
         except (ValueError, TypeError):
             cost_mxn = None
-    labor_hours = (
-        entry_dict.get("labor_hours") if "labor_hours" in entry_dict else entry_dict.get("laborHours")
-    )
+    labor_hours = entry_dict.get("labor_hours")
+    if labor_hours is None:
+        labor_hours = entry_dict.get("laborHours")
     if labor_hours is not None:
         try:
             labor_hours = float(labor_hours)
         except (ValueError, TypeError):
             labor_hours = None
-    workers_count = (
-        entry_dict.get("workers_count")
-        if "workers_count" in entry_dict
-        else entry_dict.get("workersCount")
-    )
+    workers_count = entry_dict.get("workers_count")
+    if workers_count is None:
+        workers_count = entry_dict.get("workersCount")
     if workers_count is not None:
         try:
             workers_count = int(workers_count)
         except (ValueError, TypeError):
             workers_count = None
     weather_condition = entry_dict.get("weather_condition") or entry_dict.get("weatherCondition")
-    custom_fields = (
-        entry_dict.get("custom_fields")
-        if "custom_fields" in entry_dict
-        else entry_dict.get("customFields")
-    )
+    custom_fields = entry_dict.get("custom_fields")
+    if custom_fields is None:
+        custom_fields = entry_dict.get("customFields")
     custom_fields_json = (
         json.dumps(custom_fields)
         if isinstance(custom_fields, (dict, list))
@@ -2412,55 +2434,72 @@ def update_field_logbook_entry(
             raise KeyError(f"Entrada de bitácora {entry_id} no encontrada.")
 
         current = dict(existing)
-        activity_type = payload.get("activity_type") or payload.get("activityType") or current["activity_type"]
-        activity_label = payload.get("activity_label") or payload.get("activityLabel") or current["activity_label"]
-        performed_date = payload.get("performed_date") or payload.get("performedDate") or current["performed_date"]
-        fertilization_date = (
-            payload.get("fertilization_date")
-            if "fertilization_date" in payload
-            else (payload.get("fertilizationDate") if "fertilizationDate" in payload else current.get("fertilization_date"))
+        activity_type = (
+            payload.get("activity_type")
+            or payload.get("activityType")
+            or current["activity_type"]
         )
-        input_used = (
-            payload.get("input_used")
-            if "input_used" in payload
-            else (payload.get("inputUsed") if "inputUsed" in payload else current.get("input_used"))
+        activity_label = (
+            payload.get("activity_label")
+            or payload.get("activityLabel")
+            or current["activity_label"]
         )
+        performed_date = (
+            payload.get("performed_date")
+            or payload.get("performedDate")
+            or current["performed_date"]
+        )
+        fertilization_date = current.get("fertilization_date")
+        if "fertilization_date" in payload:
+            fertilization_date = payload.get("fertilization_date")
+        elif "fertilizationDate" in payload:
+            fertilization_date = payload.get("fertilizationDate")
+
+        input_used = current.get("input_used")
+        if "input_used" in payload:
+            input_used = payload.get("input_used")
+        elif "inputUsed" in payload:
+            input_used = payload.get("inputUsed")
+
         dose = payload.get("dose") if "dose" in payload else current.get("dose")
-        cost_mxn = (
-            payload.get("cost_mxn")
-            if "cost_mxn" in payload
-            else (payload.get("costMxn") if "costMxn" in payload else current.get("cost_mxn"))
-        )
+        cost_mxn = current.get("cost_mxn")
+        if "cost_mxn" in payload:
+            cost_mxn = payload.get("cost_mxn")
+        elif "costMxn" in payload:
+            cost_mxn = payload.get("costMxn")
         if cost_mxn is not None:
             try:
                 cost_mxn = float(cost_mxn)
             except (ValueError, TypeError):
                 cost_mxn = None
-        labor_hours = (
-            payload.get("labor_hours")
-            if "labor_hours" in payload
-            else (payload.get("laborHours") if "laborHours" in payload else current.get("labor_hours"))
-        )
+
+        labor_hours = current.get("labor_hours")
+        if "labor_hours" in payload:
+            labor_hours = payload.get("labor_hours")
+        elif "laborHours" in payload:
+            labor_hours = payload.get("laborHours")
         if labor_hours is not None:
             try:
                 labor_hours = float(labor_hours)
             except (ValueError, TypeError):
                 labor_hours = None
-        workers_count = (
-            payload.get("workers_count")
-            if "workers_count" in payload
-            else (payload.get("workersCount") if "workersCount" in payload else current.get("workers_count"))
-        )
+
+        workers_count = current.get("workers_count")
+        if "workers_count" in payload:
+            workers_count = payload.get("workers_count")
+        elif "workersCount" in payload:
+            workers_count = payload.get("workersCount")
         if workers_count is not None:
             try:
                 workers_count = int(workers_count)
             except (ValueError, TypeError):
                 workers_count = None
-        weather_condition = (
-            payload.get("weather_condition")
-            if "weather_condition" in payload
-            else (payload.get("weatherCondition") if "weatherCondition" in payload else current.get("weather_condition"))
-        )
+
+        weather_condition = current.get("weather_condition")
+        if "weather_condition" in payload:
+            weather_condition = payload.get("weather_condition")
+        elif "weatherCondition" in payload:
+            weather_condition = payload.get("weatherCondition")
         notes = payload.get("notes") if "notes" in payload else current["notes"]
         photos = payload.get("photos") if "photos" in payload else None
         photos_json = (
@@ -2549,11 +2588,17 @@ def get_logbook_config(
                 "updated_by": cfg_row["updated_by"],
             }
 
-        act_query = (
-            "SELECT * FROM logbook_activity_catalog ORDER BY is_archived ASC, sort_order ASC"
-            if include_archived
-            else "SELECT * FROM logbook_activity_catalog WHERE is_active = 1 AND is_archived = 0 ORDER BY sort_order ASC"
-        )
+        if include_archived:
+            act_query = (
+                "SELECT * FROM logbook_activity_catalog "
+                "ORDER BY is_archived ASC, sort_order ASC"
+            )
+        else:
+            act_query = (
+                "SELECT * FROM logbook_activity_catalog "
+                "WHERE is_active = 1 AND is_archived = 0 "
+                "ORDER BY sort_order ASC"
+            )
         act_rows = conn.execute(act_query).fetchall()
         activities = []
         for r in act_rows:
@@ -2581,11 +2626,17 @@ def get_logbook_config(
                 }
             )
 
-        inp_query = (
-            "SELECT * FROM logbook_input_catalog ORDER BY is_archived ASC, sort_order ASC"
-            if include_archived
-            else "SELECT * FROM logbook_input_catalog WHERE is_active = 1 AND is_archived = 0 ORDER BY sort_order ASC"
-        )
+        if include_archived:
+            inp_query = (
+                "SELECT * FROM logbook_input_catalog "
+                "ORDER BY is_archived ASC, sort_order ASC"
+            )
+        else:
+            inp_query = (
+                "SELECT * FROM logbook_input_catalog "
+                "WHERE is_active = 1 AND is_archived = 0 "
+                "ORDER BY sort_order ASC"
+            )
         inp_rows = conn.execute(inp_query).fetchall()
         inputs = [
             {
@@ -2601,11 +2652,17 @@ def get_logbook_config(
             for r in inp_rows
         ]
 
-        fld_query = (
-            "SELECT * FROM logbook_custom_fields ORDER BY is_archived ASC, sort_order ASC"
-            if include_archived
-            else "SELECT * FROM logbook_custom_fields WHERE is_active = 1 AND is_archived = 0 ORDER BY sort_order ASC"
-        )
+        if include_archived:
+            fld_query = (
+                "SELECT * FROM logbook_custom_fields "
+                "ORDER BY is_archived ASC, sort_order ASC"
+            )
+        else:
+            fld_query = (
+                "SELECT * FROM logbook_custom_fields "
+                "WHERE is_active = 1 AND is_archived = 0 "
+                "ORDER BY sort_order ASC"
+            )
         fld_rows = conn.execute(fld_query).fetchall()
         custom_fields = []
         for r in fld_rows:
@@ -2781,7 +2838,10 @@ def delete_or_archive_logbook_activity(
             action = "DELETED"
 
         conn.execute(
-            "UPDATE logbook_config SET version = version + 1, updated_at_iso = ?, updated_by = 'admin_action'",
+            """
+            UPDATE logbook_config
+            SET version = version + 1, updated_at_iso = ?, updated_by = 'admin_action'
+            """,
             (now_iso,),
         )
         conn.commit()
@@ -2882,7 +2942,10 @@ def delete_or_archive_logbook_input(
             action = "DELETED"
 
         conn.execute(
-            "UPDATE logbook_config SET version = version + 1, updated_at_iso = ?, updated_by = 'admin_action'",
+            """
+            UPDATE logbook_config
+            SET version = version + 1, updated_at_iso = ?, updated_by = 'admin_action'
+            """,
             (now_iso,),
         )
         conn.commit()
@@ -2987,7 +3050,10 @@ def delete_or_archive_logbook_custom_field(
             action = "DELETED"
 
         conn.execute(
-            "UPDATE logbook_config SET version = version + 1, updated_at_iso = ?, updated_by = 'admin_action'",
+            """
+            UPDATE logbook_config
+            SET version = version + 1, updated_at_iso = ?, updated_by = 'admin_action'
+            """,
             (now_iso,),
         )
         conn.commit()

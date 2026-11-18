@@ -111,7 +111,7 @@ def test_admin_activities_crud_and_intelligent_archiving():
         assert created_entry["activity_type"] == "INJERTACION_CLONAL"
         assert created_entry["cost_mxn"] == 750.0
 
-        # 3. Delete INJERTACION_CLONAL -> MUST be ARCHIVED (intelligent archiving) because history references it
+        # 3. Delete INJERTACION_CLONAL -> MUST be ARCHIVED (intelligent archiving)
         del_res = client.delete(
             "/api/v1/admin/logbook/activities/INJERTACION_CLONAL",
             params={"requester_role": "admin_astra"},

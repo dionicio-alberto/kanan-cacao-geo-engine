@@ -362,7 +362,9 @@ def update_logbook_endpoint(entry_id: str, payload: Dict[str, Any]) -> Dict[str,
 def delete_logbook_endpoint(entry_id: str) -> Dict[str, Any]:
     deleted = delete_field_logbook_entry(entry_id=entry_id)
     if not deleted:
-        raise HTTPException(status_code=404, detail=f"Entrada de bitácora {entry_id} no encontrada.")
+        raise HTTPException(
+            status_code=404, detail=f"Entrada de bitácora {entry_id} no encontrada."
+        )
     return {
         "status": "DELETED",
         "entry_id": entry_id,
